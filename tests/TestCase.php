@@ -4,4 +4,9 @@ declare(strict_types=1);
 
 namespace Skylence\Shardwise\Tests;
 
-use Skylence\Shardwise\ShardwiseServiceProvider;
+use Orchestra\Testbench\TestCase as Orchestra;
+
+abstract class TestCase extends Orchestra
+{
+    //
+}
