@@ -1,12 +1,14 @@
 <?php
 
-namespace VendorName\Skeleton\Commands;
+declare(strict_types=1);
+
+namespace Skylence\Shardwise\Commands;
 
 use Illuminate\Console\Command;
 
-class SkeletonCommand extends Command
+final class ShardwiseCommand extends Command
 {
-    public $signature = 'skeleton';
+    public $signature = 'sharded-db-package';
 
     public $description = 'My command';
 
