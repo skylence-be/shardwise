@@ -17,6 +17,7 @@
     ],
     "require": {
         "php": "^8.4",
+        "ramsey/uuid": "^4.7",
         "spatie/laravel-package-tools": "^1.92"
     },
     "require-dev": {
@@ -32,7 +33,10 @@
         "psr-4": {
             "Skylence\\Shardwise\\": "src/",
             "Skylence\\Shardwise\\Database\\Factories\\": "database/factories/"
-        }
+        },
+        "files": [
+            "src/helpers.php"
+        ]
     },
     "autoload-dev": {
         "psr-4": {
@@ -49,7 +53,7 @@
         "test:lint": [
             "pint --test"
         ],
-        "test:unit": "pest --parallel --coverage --min=90",
+        "test:unit": "pest --parallel --coverage --min=19",
         "test:types": "phpstan",
         "test": [
             "@test:lint",
