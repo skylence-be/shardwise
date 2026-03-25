@@ -1,16 +1,14 @@
 # Shardwise
 
-> **This package is archived and no longer maintained.**
+> **This package is archived.** It was built as a learning exercise and development tool for shard-aware data modeling in Laravel. While it includes working optimizations (co-location routing, parallel queries, postgres_fdw integration), application-level sharding in PHP is not recommended for production horizontal scaling.
 >
-> Application-level sharding in PHP adds 5-9x overhead on cross-shard queries compared to a single database, and only benefits datasets exceeding 1TB where database-native solutions like [Citus](https://www.citusdata.com/), [Vitess](https://vitess.io/), or [CockroachDB](https://www.cockroachlabs.com/) are better suited.
->
-> **What to use instead:**
+> **For production, use database-native solutions:**
 > - **< 100GB** — Don't shard. Use indexes, caching, read replicas.
-> - **100GB - 1TB** — Use [PostgreSQL native partitioning](https://www.postgresql.org/docs/current/ddl-partitioning.html).
-> - **1TB+** — Use [Citus](https://www.citusdata.com/) (PostgreSQL extension) or [Vitess](https://vitess.io/) (MySQL).
-> - **Multi-region** — Use [CockroachDB](https://www.cockroachlabs.com/).
+> - **100GB - 1TB** — [PostgreSQL native partitioning](https://www.postgresql.org/docs/current/ddl-partitioning.html).
+> - **1TB+** — [Citus](https://www.citusdata.com/) (PostgreSQL) or [Vitess](https://vitess.io/) (MySQL).
+> - **Multi-region** — [CockroachDB](https://www.cockroachlabs.com/).
 >
-> The model patterns in this package (`CentralModel`, `HasShardedRelationships`, shard-aware UUIDs) remain useful as reference implementations. See the [benchmark results](docs/benchmark-results.md) and [common pitfalls](docs/common-pitfalls.md) documentation for lessons learned.
+> See the [benchmark results](docs/benchmark-results.md), [performance optimization roadmap](docs/performance-optimization-roadmap.md), and [common pitfalls](docs/common-pitfalls.md) for lessons learned.
 
 ---
 
