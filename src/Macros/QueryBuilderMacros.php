@@ -52,7 +52,8 @@ final class QueryBuilderMacros
             $shards = shardwise()->getShards()->active();
 
             foreach ($shards as $shard) {
-                $shardResults = shardwise()->run($shard, fn (): Collection => $this->get());
+                $clone = $this->clone();
+                $shardResults = shardwise()->run($shard, fn (): Collection => $clone->get());
 
                 $results = $results->merge($shardResults);
             }
@@ -70,7 +71,8 @@ final class QueryBuilderMacros
             $shards = shardwise()->getShards()->active();
 
             foreach ($shards as $shard) {
-                $total += shardwise()->run($shard, fn (): int => $this->count($columns));
+                $clone = $this->clone();
+                $total += shardwise()->run($shard, fn (): int => $clone->count($columns));
             }
 
             return $total;
@@ -84,7 +86,8 @@ final class QueryBuilderMacros
             $shards = shardwise()->getShards()->active();
 
             foreach ($shards as $shard) {
-                $exists = shardwise()->run($shard, fn (): bool => $this->exists());
+                $clone = $this->clone();
+                $exists = shardwise()->run($shard, fn (): bool => $clone->exists());
 
                 if ($exists) {
                     return true;
@@ -124,7 +127,8 @@ final class QueryBuilderMacros
             $shards = shardwise()->getShards()->active();
 
             foreach ($shards as $shard) {
-                $shardResults = shardwise()->run($shard, fn (): \Illuminate\Support\Collection => $this->get());
+                $clone = clone $this;
+                $shardResults = shardwise()->run($shard, fn (): \Illuminate\Support\Collection => $clone->get());
 
                 $results = $results->merge($shardResults);
             }
@@ -142,7 +146,8 @@ final class QueryBuilderMacros
             $shards = shardwise()->getShards()->active();
 
             foreach ($shards as $shard) {
-                $total += shardwise()->run($shard, fn (): int => $this->count($columns));
+                $clone = clone $this;
+                $total += shardwise()->run($shard, fn (): int => $clone->count($columns));
             }
 
             return $total;
@@ -158,7 +163,8 @@ final class QueryBuilderMacros
             $shards = shardwise()->getShards()->active();
 
             foreach ($shards as $shard) {
-                $total += shardwise()->run($shard, fn (): int|float => $this->sum($column));
+                $clone = clone $this;
+                $total += shardwise()->run($shard, fn (): int|float => $clone->sum($column));
             }
 
             return $total;

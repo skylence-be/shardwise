@@ -205,9 +205,14 @@ final class ShardAwareUuidFactory
             return (int) $id;
         }
 
-        // Otherwise, extract a number from the ID or hash it
-        if (preg_match('/(\d+)/', $id, $matches)) {
+        // Try explicit shard-N pattern first
+        if (preg_match('/shard[_-]?(\d+)/i', $id, $matches)) {
             return (int) $matches[1];
+        }
+
+        // Otherwise, extract the last numeric segment from the ID
+        if (preg_match_all('/(\d+)/', $id, $matches)) {
+            return (int) end($matches[1]);
         }
 
         // Fall back to a hash

@@ -122,7 +122,6 @@ final class ShardableQueryBuilder extends Builder
     private function deepClone(): self
     {
         $clone = clone $this;
-        $clone->connection = clone $this->connection;
         $clone->grammar = clone $this->grammar;
         $clone->processor = clone $this->processor;
 
