@@ -12,6 +12,7 @@ use Illuminate\Support\LazyCollection;
 use Skylence\Shardwise\Concerns\DetectsScatterQueries;
 use Skylence\Shardwise\Contracts\ShardInterface;
 use Skylence\Shardwise\ShardCollection;
+use Throwable;
 
 /**
  * Builder for cross-shard queries and aggregations.
@@ -431,12 +432,26 @@ final class CrossShardBuilder
         }
 
         foreach ($this->targetShards ?? [] as $shard) {
-            shardwise()->run($shard, function () use ($shard, $callback): void {
-                // Deep-clone the builder for each shard to avoid shared connection state
-                $clone = $this->cloneBuilder();
-                $result = $callback($shard, $clone);
-                $this->shardResults[$shard->getId()] = $result;
-            });
+            try {
+                shardwise()->run($shard, function () use ($shard, $callback): void {
+                    // Deep-clone the builder for each shard to avoid shared connection state
+                    $clone = $this->cloneBuilder();
+
+                    // Explicitly set the shard connection on the cloned query builder
+                    /** @var \Illuminate\Database\DatabaseManager $db */
+                    $db = app('db');
+                    $clone->getQuery()->connection = $db->connection($shard->getConnectionName());
+
+                    $result = $callback($shard, $clone);
+                    $this->shardResults[$shard->getId()] = $result;
+                });
+            } catch (Throwable $e) {
+                if (config('shardwise.dead_shard_tolerance', false)) {
+                    continue;
+                }
+
+                throw $e;
+            }
         }
     }
 }

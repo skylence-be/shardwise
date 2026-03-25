@@ -187,6 +187,18 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Dead Shard Tolerance
+    |--------------------------------------------------------------------------
+    |
+    | When enabled, cross-shard queries will continue executing on remaining
+    | shards even if one or more shards fail. Failures are silently skipped.
+    | This is useful in production when partial results are acceptable.
+    |
+    */
+    'dead_shard_tolerance' => (bool) env('SHARDWISE_DEAD_SHARD_TOLERANCE', false),
+
+    /*
+    |--------------------------------------------------------------------------
     | Health Check Settings
     |--------------------------------------------------------------------------
     |

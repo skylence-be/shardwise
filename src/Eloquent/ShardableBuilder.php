@@ -4,15 +4,19 @@ declare(strict_types=1);
 
 namespace Skylence\Shardwise\Eloquent;
 
+use Closure;
 use Illuminate\Database\DatabaseManager;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\LazyCollection;
 use Skylence\Shardwise\Contracts\ShardableInterface;
 use Skylence\Shardwise\Contracts\ShardInterface;
 use Skylence\Shardwise\Query\CrossShardBuilder;
+use Skylence\Shardwise\Query\CrossShardPaginator;
 use Skylence\Shardwise\Uuid\UuidShardDecoder;
+use Throwable;
 
 /**
  * Shard-aware Eloquent query builder.
@@ -114,6 +118,94 @@ final class ShardableBuilder extends Builder
     }
 
     /**
+     * Get the sum of a column from all shards.
+     *
+     * @param  string  $column
+     */
+    public function sum($column): float|int
+    {
+        if ($this->allShards) {
+            return $this->crossShard()->sum($column);
+        }
+
+        return parent::sum($column);
+    }
+
+    /**
+     * Get the average of a column from all shards.
+     *
+     * @param  string  $column
+     */
+    public function avg($column): float|int
+    {
+        if ($this->allShards) {
+            return $this->crossShard()->avg($column);
+        }
+
+        return parent::avg($column);
+    }
+
+    /**
+     * Get the minimum value of a column from all shards.
+     *
+     * @param  string  $column
+     */
+    public function min($column): mixed
+    {
+        if ($this->allShards) {
+            return $this->crossShard()->min($column);
+        }
+
+        return parent::min($column);
+    }
+
+    /**
+     * Get the maximum value of a column from all shards.
+     *
+     * @param  string  $column
+     */
+    public function max($column): mixed
+    {
+        if ($this->allShards) {
+            return $this->crossShard()->max($column);
+        }
+
+        return parent::max($column);
+    }
+
+    /**
+     * Paginate results, using CrossShardPaginator when querying all shards.
+     *
+     * @param  int|Closure  $perPage
+     * @param  array<int, string>|string  $columns
+     * @param  string  $pageName
+     * @param  int|null  $page
+     * @param  Closure|int|null  $total
+     */
+    public function paginate($perPage = 15, $columns = ['*'], $pageName = 'page', $page = null, $total = null): LengthAwarePaginator
+    {
+        if ($this->allShards) {
+            $paginator = new CrossShardPaginator($this);
+
+            // Extract ordering from the builder
+            $orders = $this->getQuery()->orders ?? [];
+            $orderColumn = $orders[0]['column'] ?? null;
+            $orderDirection = $orders[0]['direction'] ?? 'asc';
+
+            return $paginator->paginate(
+                $perPage instanceof Closure ? $perPage() : (int) $perPage,
+                is_array($columns) ? $columns : [$columns],
+                $pageName,
+                $page !== null ? (int) $page : null,
+                $orderColumn,
+                $orderDirection,
+            );
+        }
+
+        return parent::paginate($perPage, $columns, $pageName, $page, $total);
+    }
+
+    /**
      * Get a cross-shard builder for aggregations.
      *
      * @return CrossShardBuilder<TModel>
@@ -190,7 +282,44 @@ final class ShardableBuilder extends Builder
     }
 
     /**
+     * Eagerly load a relation, ensuring related models with fixed connections
+     * (e.g. CentralModel or explicit $connection) use their own connection
+     * instead of the current shard connection.
+     *
+     * @param  array<int, TModel>  $models
+     * @return array<int, TModel>
+     */
+    protected function eagerLoadRelation(array $models, $name, Closure $constraints): array
+    {
+        $relation = $this->getRelation($name);
+        $relatedModel = $relation->getRelated();
+
+        // If the related model has a fixed connection (CentralModel or explicit),
+        // ensure the relation query uses that connection instead of the shard connection
+        $relatedConnection = $relatedModel->getConnectionName();
+
+        if ($relatedConnection !== null) {
+            /** @var DatabaseManager $db */
+            $db = app('db');
+            $relation->getBaseQuery()->connection = $db->connection($relatedConnection);
+        }
+
+        $relation->addEagerConstraints($models);
+        $constraints($relation);
+
+        return $relation->match(
+            $relation->initRelation($models, $name),
+            $relation->getEager(),
+            $name
+        );
+    }
+
+    /**
      * Get results from all shards and merge them.
+     *
+     * Captures ordering and limit/offset from the query, strips them from
+     * per-shard clones, then applies global ordering and pagination after
+     * merging results from all shards.
      *
      * @param  array<int, string>|string  $columns
      * @return Collection<int, TModel>
@@ -204,17 +333,58 @@ final class ShardableBuilder extends Builder
 
         $shards = shardwise()->getShards()->active();
 
+        // Capture ordering and limit/offset from the underlying query
+        $query = $this->getQuery();
+        $orders = $query->orders ?? [];
+        $originalLimit = $query->limit;
+        $originalOffset = $query->offset;
+
+        // Calculate how many items each shard needs to return
+        $fetchLimit = $originalLimit !== null
+            ? ($originalOffset ?? 0) + $originalLimit
+            : null;
+
         foreach ($shards as $shard) {
-            $shardResults = shardwise()->run($shard, function () use ($columns): Collection {
-                // Deep-clone the builder (including underlying query) to avoid shared connection state
-                $clone = $this->clone();
-                $clone->allShards = false;
+            try {
+                $shardResults = shardwise()->run($shard, function () use ($shard, $columns, $fetchLimit): Collection {
+                    // Deep-clone the builder (including underlying query) to avoid shared connection state
+                    $clone = $this->clone();
+                    $clone->allShards = false;
 
-                // Call get() on the clone, which will now use parent::get() since allShards is false
-                return $clone->get($columns);
-            });
+                    // Explicitly set the shard connection on the cloned query builder
+                    // (the clone inherits the original connection, not the shard context)
+                    /** @var DatabaseManager $db */
+                    $db = app('db');
+                    $clone->getQuery()->connection = $db->connection($shard->getConnectionName());
 
-            $results = $results->merge($shardResults);
+                    // Override limit to fetch enough for global pagination
+                    if ($fetchLimit !== null) {
+                        $clone->getQuery()->limit = $fetchLimit;
+                        $clone->getQuery()->offset = null;
+                    }
+
+                    // Call get() on the clone, which will now use parent::get() since allShards is false
+                    return $clone->get($columns);
+                });
+
+                $results = $results->merge($shardResults);
+            } catch (Throwable $e) {
+                if (config('shardwise.dead_shard_tolerance', false)) {
+                    continue;
+                }
+
+                throw $e;
+            }
+        }
+
+        // Apply global ordering
+        if (! empty($orders)) {
+            $results = $this->applyCrossShardOrdering($results, $orders);
+        }
+
+        // Apply global offset/limit
+        if ($originalOffset !== null || $originalLimit !== null) {
+            $results = $results->slice($originalOffset ?? 0, $originalLimit)->values();
         }
 
         return $results;
@@ -230,19 +400,56 @@ final class ShardableBuilder extends Builder
         $shards = shardwise()->getShards()->active();
 
         foreach ($shards as $shard) {
-            $count = shardwise()->run($shard, function () use ($columns): int {
-                // Deep-clone the builder (including underlying query) to avoid shared connection state
-                $clone = $this->clone();
-                $clone->allShards = false;
+            try {
+                $count = shardwise()->run($shard, function () use ($shard, $columns): int {
+                    // Deep-clone the builder (including underlying query) to avoid shared connection state
+                    $clone = $this->clone();
+                    $clone->allShards = false;
 
-                // Call count() on the clone, which will now use parent::count() since allShards is false
-                return $clone->count($columns);
-            });
+                    // Explicitly set the shard connection on the cloned query builder
+                    /** @var DatabaseManager $db */
+                    $db = app('db');
+                    $clone->getQuery()->connection = $db->connection($shard->getConnectionName());
 
-            $total += $count;
+                    // Call count() on the clone, which will now use parent::count() since allShards is false
+                    return $clone->count($columns);
+                });
+
+                $total += $count;
+            } catch (Throwable $e) {
+                if (config('shardwise.dead_shard_tolerance', false)) {
+                    continue;
+                }
+
+                throw $e;
+            }
         }
 
         return $total;
+    }
+
+    /**
+     * Apply cross-shard ordering to merged results.
+     *
+     * Processes orders in reverse so the first (primary) order takes precedence,
+     * using stable sort semantics from Laravel's Collection.
+     *
+     * @param  Collection<int, TModel>  $results
+     * @param  array<int, array{column: string, direction: string}>  $orders
+     * @return Collection<int, TModel>
+     */
+    private function applyCrossShardOrdering(Collection $results, array $orders): Collection
+    {
+        foreach (array_reverse($orders) as $order) {
+            $column = $order['column'];
+            $direction = strtolower($order['direction'] ?? 'asc');
+
+            $results = $direction === 'desc'
+                ? $results->sortByDesc($column)
+                : $results->sortBy($column);
+        }
+
+        return $results->values();
     }
 
     /**

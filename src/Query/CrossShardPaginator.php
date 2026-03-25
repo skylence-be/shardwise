@@ -142,8 +142,13 @@ final class CrossShardPaginator
         $shards = shardwise()->getShards()->active();
 
         foreach ($shards as $shard) {
-            $shardItems = shardwise()->run($shard, function () use ($columns, $limit, $orderByColumn, $orderDirection): Collection {
+            $shardItems = shardwise()->run($shard, function () use ($shard, $columns, $limit, $orderByColumn, $orderDirection): Collection {
                 $query = clone $this->builder;
+
+                // Explicitly set the shard connection on the cloned query builder
+                /** @var \Illuminate\Database\DatabaseManager $db */
+                $db = app('db');
+                $query->getQuery()->connection = $db->connection($shard->getConnectionName());
 
                 if ($orderByColumn !== null) {
                     $query->orderBy($orderByColumn, $orderDirection);
