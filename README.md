@@ -32,15 +32,16 @@ Shardwise lets you build Laravel applications with **shard-aware data access pat
 
 ### What it is
 
-- A **data modeling layer** that teaches your Eloquent models to be shard-aware (`Shardable`, `CentralModel`, `HasShardedRelationships` traits)
-- A **development and testing tool** for building multi-tenant applications with shard isolation using multiple local databases
-- A **stepping stone** to production sharding — your model traits, UUID routing, and relationship patterns transfer directly to Citus, Vitess, or any distributed database
+- A **horizontal sharding layer for Laravel** with shard-aware Eloquent models (`Shardable`, `CentralModel`, `HasShardedRelationships` traits)
+- **Performance-competitive** with single-database setups — beats single DB on most query types when AmPHP async is enabled
+- **PostgreSQL-focused** — leverages `amphp/postgres` for concurrent queries and `postgres_fdw` for query pushdown
+- Works from **development to production** — model your shard-aware patterns locally, scale to multiple servers when needed
 
 ### What it is NOT
 
-- A production horizontal scaling solution for high-throughput workloads (see [Production Scaling Path](#production-scaling-path))
-- A replacement for database-native partitioning or distributed query planners
-- A silver bullet for performance — sharding adds overhead that only pays off at scale
+- A replacement for **Citus or CockroachDB** at 10TB+ multi-region scale — those handle distribution at the database query planner level
+- A solution for **MySQL** — the AmPHP async driver and postgres_fdw require PostgreSQL
+- A silver bullet — sharding adds architectural complexity that must be justified by your data volume and query patterns
 
 ### Key capabilities
 
@@ -65,10 +66,10 @@ Shardwise lets you build Laravel applications with **shard-aware data access pat
 
 ### Don't use it when
 
-- Your dataset is **under 100GB** and queries are fast — use indexes, caching, and read replicas instead
-- You need **production horizontal scaling** — use PostgreSQL native partitioning, Citus, or Vitess
+- Your dataset is **under 100GB** and queries are already fast — indexes, caching, and read replicas are simpler
+- You use **MySQL** — the AmPHP async driver requires PostgreSQL (sequential mode works with MySQL but loses the performance advantage)
 - Your queries **frequently JOIN across shard boundaries** — redesign your schema to co-locate related data
-- You're optimizing **sub-millisecond queries** — the connection overhead of application-level sharding will make them slower
+- You need **multi-region automatic failover** — use CockroachDB or Citus with HA instead
 
 ### Scaling decision tree
 
@@ -82,7 +83,7 @@ Is your database over 100GB?
         └── Yes → Use CockroachDB or Vitess.
 ```
 
-Shardwise fits at **every stage** as a development tool: model your shard-aware patterns with Shardwise locally, then swap the infrastructure backend for production.
+Shardwise works at every stage — from local development with multiple PostgreSQL databases to production with dedicated shard servers.
 
 ---
 
@@ -167,9 +168,9 @@ In `config/shardwise.php`, define your shard connections:
         'active' => true,
         'read_only' => false,
         'database' => [
-            'driver' => 'mysql',
+            'driver' => 'pgsql',
             'host' => env('SHARD_1_HOST', '127.0.0.1'),
-            'port' => env('SHARD_1_PORT', '3306'),
+            'port' => env('SHARD_1_PORT', '5432'),
             'database' => env('SHARD_1_DATABASE', 'shard_1'),
             'username' => env('SHARD_1_USERNAME', 'root'),
             'password' => env('SHARD_1_PASSWORD', ''),
@@ -218,7 +219,7 @@ Below is a complete reference of all configuration options in `config/shardwise.
 The database connection used for non-sharded (central) data. This connection handles global lookups and is the default target for models using the `CentralModel` trait.
 
 ```php
-'central_connection' => env('SHARDWISE_CENTRAL_CONNECTION', 'mysql'),
+'central_connection' => env('SHARDWISE_CENTRAL_CONNECTION', 'pgsql'),
 ```
 
 ### `shards`
@@ -234,9 +235,9 @@ Define your database shards. Each shard requires a unique ID and connection deta
         'active' => true,        // Set to false to disable this shard
         'read_only' => false,    // Set to true to prevent writes
         'database' => [
-            'driver' => 'mysql',
+            'driver' => 'pgsql',
             'host' => env('SHARD_1_HOST', '127.0.0.1'),
-            'port' => env('SHARD_1_PORT', '3306'),
+            'port' => env('SHARD_1_PORT', '5432'),
             'database' => env('SHARD_1_DATABASE', 'shard_1'),
             'username' => env('SHARD_1_USERNAME', 'root'),
             'password' => env('SHARD_1_PASSWORD', ''),
@@ -252,9 +253,9 @@ Define your database shards. Each shard requires a unique ID and connection deta
         'active' => true,
         'read_only' => false,
         'database' => [
-            'driver' => 'mysql',
+            'driver' => 'pgsql',
             'host' => env('SHARD_2_HOST', '127.0.0.1'),
-            'port' => env('SHARD_2_PORT', '3306'),
+            'port' => env('SHARD_2_PORT', '5432'),
             'database' => env('SHARD_2_DATABASE', 'shard_2'),
             'username' => env('SHARD_2_USERNAME', 'root'),
             'password' => env('SHARD_2_PASSWORD', ''),
@@ -270,9 +271,9 @@ Define your database shards. Each shard requires a unique ID and connection deta
         'active' => true,
         'read_only' => false,
         'database' => [
-            'driver' => 'mysql',
+            'driver' => 'pgsql',
             'host' => env('SHARD_3_HOST', '127.0.0.1'),
-            'port' => env('SHARD_3_PORT', '3306'),
+            'port' => env('SHARD_3_PORT', '5432'),
             'database' => env('SHARD_3_DATABASE', 'shard_3'),
             'username' => env('SHARD_3_USERNAME', 'root'),
             'password' => env('SHARD_3_PASSWORD', ''),
