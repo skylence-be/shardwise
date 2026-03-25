@@ -43,20 +43,23 @@ final class CrossShardPaginator
         string $orderDirection = 'asc',
     ): LengthAwarePaginator {
         $page ??= LengthAwarePaginator::resolveCurrentPage($pageName);
-
-        // Get total count from all shards
-        $crossShardBuilder = new CrossShardBuilder($this->builder);
-        $total = $crossShardBuilder->count();
-
-        // Calculate the offset for this page
         $offset = ($page - 1) * $perPage;
-
-        // We need to fetch at least offset + perPage items to cover the requested page
-        // Each shard should fetch this amount to handle uneven distribution
         $itemsToFetch = $offset + $perPage;
 
-        // Get items from all shards
-        $allItems = $this->fetchFromAllShards($columns, $itemsToFetch, $orderByColumn, $orderDirection);
+        $shards = shardwise()->getShards()->active();
+        $useAmphp = config('shardwise.parallel_queries.enabled', false)
+            && config('shardwise.parallel_queries.driver', 'amphp') === 'amphp'
+            && $shards->count() > 1
+            && class_exists(\Amp\Postgres\PostgresConnectionPool::class);
+
+        if ($useAmphp) {
+            // Fire count + data queries concurrently across all shards in one batch
+            [$total, $allItems] = $this->paginateAmphp($shards, $columns, $itemsToFetch, $orderByColumn, $orderDirection);
+        } else {
+            $crossShardBuilder = new CrossShardBuilder($this->builder);
+            $total = $crossShardBuilder->count();
+            $allItems = $this->fetchFromAllShards($columns, $itemsToFetch, $orderByColumn, $orderDirection);
+        }
 
         // Sort the combined results if order is specified
         if ($orderByColumn !== null) {
@@ -121,6 +124,78 @@ final class CrossShardPaginator
             : $allItems->sortByDesc($cursorColumn);
 
         return $sorted->take($perPage)->values();
+    }
+
+    /**
+     * Run count + data queries concurrently across all shards via AmPHP.
+     *
+     * Instead of count() then fetch() sequentially, fires all N count queries
+     * and all N data queries as 2N concurrent Futures in one batch.
+     *
+     * @param  array<int, string>  $columns
+     * @return array{0: int, 1: Collection<int, TModel>}
+     */
+    private function paginateAmphp(
+        \Skylence\Shardwise\ShardCollection $shards,
+        array $columns,
+        int $limit,
+        ?string $orderByColumn,
+        string $orderDirection,
+    ): array {
+        $model = $this->builder->getModel();
+        $table = $model->getTable();
+        $wheres = $this->builder->getQuery()->wheres;
+        $queryBindings = $this->builder->getQuery()->bindings;
+
+        // Build count SQL
+        $countFresh = $model->newQuery();
+        $countFresh->getQuery()->wheres = $wheres;
+        $countFresh->getQuery()->bindings = $queryBindings;
+        $countFresh->selectRaw('count(*) as aggregate');
+        $countSql = $countFresh->toSql();
+        $countBindings = $countFresh->getBindings();
+
+        // Build data SQL
+        $dataFresh = $model->newQuery();
+        $dataFresh->getQuery()->wheres = $wheres;
+        $dataFresh->getQuery()->bindings = $queryBindings;
+        if ($orderByColumn !== null) {
+            $dataFresh->orderBy($orderByColumn, $orderDirection);
+        }
+        $dataFresh->take($limit);
+        $dataFresh->select($columns);
+        $dataSql = $dataFresh->toSql();
+        $dataBindings = $dataFresh->getBindings();
+
+        $tolerateDeadShards = (bool) config('shardwise.dead_shard_tolerance', false);
+
+        try {
+            // Fire ALL 2N queries (count + data per shard) simultaneously
+            [$countResults, $dataResults] = \Skylence\Shardwise\Async\AsyncShardQueryExecutor::dualQueryAll(
+                $shards, $countSql, $countBindings, $dataSql, $dataBindings, $tolerateDeadShards
+            );
+
+            $total = 0;
+            foreach ($countResults as $count) {
+                $total += (int) $count;
+            }
+
+            $allItems = new Collection;
+            foreach ($dataResults as $rows) {
+                foreach ($rows as $row) {
+                    $allItems->push($model->newFromBuilder((object) $row));
+                }
+            }
+
+            return [$total, $allItems];
+        } catch (Throwable) {
+            // Fall back to sequential
+            $crossShardBuilder = new CrossShardBuilder($this->builder);
+            $total = $crossShardBuilder->count();
+            $allItems = $this->fetchFromAllShardsSequential($shards, $columns, $limit, $orderByColumn, $orderDirection);
+
+            return [$total, $allItems];
+        }
     }
 
     /**

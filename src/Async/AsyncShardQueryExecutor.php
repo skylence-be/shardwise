@@ -103,6 +103,58 @@ final class AsyncShardQueryExecutor
     }
 
     /**
+     * Execute two different queries concurrently across all shards.
+     *
+     * Fires 2N queries (N per query type) simultaneously, returning
+     * both result sets. Useful for paginate (count + data in one batch).
+     *
+     * @param  array<int, mixed>  $params1
+     * @param  array<int, mixed>  $params2
+     * @return array{0: array<string, mixed>, 1: array<string, array<int, array<string, mixed>>>}
+     */
+    public static function dualQueryAll(
+        ShardCollection $shards,
+        string $scalarSql,
+        array $scalarParams,
+        string $dataSql,
+        array $dataParams,
+        bool $tolerateDeadShards = false,
+    ): array {
+        $scalarSql = self::convertPlaceholders($scalarSql);
+        $dataSql = self::convertPlaceholders($dataSql);
+
+        $scalarFutures = [];
+        $dataFutures = [];
+
+        foreach ($shards as $shard) {
+            $pool = self::getPool($shard);
+            $shardId = $shard->getId();
+
+            $scalarFutures[$shardId] = async(function () use ($pool, $scalarSql, $scalarParams): mixed {
+                $result = $pool->execute($scalarSql, $scalarParams);
+                $row = $result->fetchRow();
+
+                return $row !== null ? array_values($row)[0] : null;
+            });
+
+            $dataFutures[$shardId] = async(function () use ($pool, $dataSql, $dataParams): array {
+                $result = $pool->execute($dataSql, $dataParams);
+                $rows = [];
+                foreach ($result as $row) {
+                    $rows[] = $row;
+                }
+
+                return $rows;
+            });
+        }
+
+        // All 2N futures are already running concurrently via async().
+        // Awaiting scalar futures first doesn't block data futures — they
+        // continue executing on the event loop while we collect results.
+        return [await($scalarFutures), await($dataFutures)];
+    }
+
+    /**
      * Close all connection pools and reset the pool cache.
      */
     public static function closeAll(): void

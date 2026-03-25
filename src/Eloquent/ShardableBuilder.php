@@ -619,23 +619,34 @@ final class ShardableBuilder extends Builder
 
     /**
      * Count from shards concurrently using AmPHP Fibers.
+     *
+     * Builds minimal SQL directly to avoid Eloquent builder overhead.
      */
     private function countFromShardsAmphp(ShardCollection $shards, string $columns = '*'): int
     {
         $model = $this->getModel();
-        $fresh = $model->newQuery();
-        $fresh->getQuery()->wheres = $this->getQuery()->wheres;
-        $fresh->getQuery()->bindings = $this->getQuery()->bindings;
-        $fresh->selectRaw("count({$columns}) as aggregate");
+        $table = $model->getTable();
+        $wheres = $this->getQuery()->wheres;
+        $bindings = array_values($this->getQuery()->getRawBindings()['where'] ?? []);
 
-        $sql = $fresh->toSql();
-        $bindings = $fresh->getBindings();
+        // Build minimal count SQL directly — skip Eloquent builder overhead
+        $sql = "select count({$columns}) as aggregate from \"{$table}\"";
+
+        if (! empty($wheres)) {
+            // Use Eloquent's grammar to compile WHERE clauses correctly
+            $fresh = $model->newQuery();
+            $fresh->getQuery()->wheres = $wheres;
+            $fresh->getQuery()->bindings = $this->getQuery()->bindings;
+            $fresh->selectRaw("count({$columns}) as aggregate");
+            $sql = $fresh->toSql();
+            $bindings = $fresh->getBindings();
+        }
+
         $tolerateDeadShards = (bool) config('shardwise.dead_shard_tolerance', false);
 
         try {
             $shardResults = AsyncShardQueryExecutor::scalarAll($shards, $sql, $bindings, $tolerateDeadShards);
-        } catch (Throwable $e) {
-            // Fall back to sequential if amphp fails entirely
+        } catch (Throwable) {
             return $this->countFromShardsSequential($shards, $columns);
         }
 
