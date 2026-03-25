@@ -1,12 +1,25 @@
 # Shardwise
 
+> **This package is archived and no longer maintained.**
+>
+> Application-level sharding in PHP adds 5-9x overhead on cross-shard queries compared to a single database, and only benefits datasets exceeding 1TB where database-native solutions like [Citus](https://www.citusdata.com/), [Vitess](https://vitess.io/), or [CockroachDB](https://www.cockroachlabs.com/) are better suited.
+>
+> **What to use instead:**
+> - **< 100GB** — Don't shard. Use indexes, caching, read replicas.
+> - **100GB - 1TB** — Use [PostgreSQL native partitioning](https://www.postgresql.org/docs/current/ddl-partitioning.html).
+> - **1TB+** — Use [Citus](https://www.citusdata.com/) (PostgreSQL extension) or [Vitess](https://vitess.io/) (MySQL).
+> - **Multi-region** — Use [CockroachDB](https://www.cockroachlabs.com/).
+>
+> The model patterns in this package (`CentralModel`, `HasShardedRelationships`, shard-aware UUIDs) remain useful as reference implementations. See the [benchmark results](docs/benchmark-results.md) and [common pitfalls](docs/common-pitfalls.md) documentation for lessons learned.
+
+---
+
 **Shard-aware data modeling for Laravel — build horizontally scalable applications today, scale infrastructure when you need to**
 
 [![PHP 8.4+](https://img.shields.io/badge/PHP-8.4%2B-blue?style=flat-square)](https://www.php.net/)
 [![Laravel 13+](https://img.shields.io/badge/Laravel-13%2B-red?style=flat-square)](https://laravel.com/)
 [![License MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE.md)
-[![Latest Version on Packagist](https://img.shields.io/packagist/v/jonasvanderhaegen/sharded-db-package.svg?style=flat-square)](https://packagist.org/packages/jonasvanderhaegen/sharded-db-package)
-[![Total Downloads](https://img.shields.io/packagist/dt/jonasvanderhaegen/sharded-db-package.svg?style=flat-square)](https://packagist.org/packages/jonasvanderhaegen/sharded-db-package)
+[![Archived](https://img.shields.io/badge/Status-Archived-orange?style=flat-square)]()
 
 ---
 
