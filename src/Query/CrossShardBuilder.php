@@ -435,11 +435,14 @@ final class CrossShardBuilder
             );
         }
 
-        $useParallel = config('shardwise.parallel_queries.enabled', false)
-            && $shardCount > 1
-            && class_exists(Concurrency::class);
+        $useParallel = config('shardwise.parallel_queries.enabled', false) && $shardCount > 1;
+        $driver = config('shardwise.parallel_queries.driver', 'amphp');
+        $useAmphp = $useParallel && $driver === 'amphp'
+            && class_exists(\Amp\Postgres\PostgresConnectionPool::class);
 
-        if ($useParallel) {
+        if ($useAmphp) {
+            $this->executeOnShardsAmphp($callback);
+        } elseif ($useParallel && class_exists(Concurrency::class)) {
             $this->executeOnShardsParallel($callback);
         } else {
             $this->executeOnShardsSequential($callback);
@@ -519,6 +522,54 @@ final class CrossShardBuilder
             }
         } catch (Throwable) {
             // Fall back to sequential if parallel fails
+            $this->executeOnShardsSequential($callback);
+        }
+    }
+
+    /**
+     * Execute a callback on each target shard concurrently using AmPHP Fibers.
+     *
+     * Builds the SQL from the Eloquent builder, then fires all queries
+     * simultaneously via AsyncShardQueryExecutor. Each shard result is
+     * passed to the callback for processing.
+     *
+     * @param  callable(ShardInterface, Builder<TModel>): mixed  $callback
+     */
+    private function executeOnShardsAmphp(callable $callback): void
+    {
+        // For AmPHP, we can't serialize closures — instead, build fresh
+        // Eloquent builders per shard inside shardwise()->run() but
+        // fire them concurrently via Amp\async + Amp\Future\await
+        $futures = [];
+
+        foreach ($this->targetShards ?? [] as $shard) {
+            $shardId = $shard->getId();
+
+            $futures[$shardId] = \Amp\async(function () use ($shard, $callback): mixed {
+                return shardwise()->run($shard, function () use ($shard, $callback): mixed {
+                    $model = $this->builder->getModel();
+                    $fresh = $model->on($shard->getConnectionName())->newQuery();
+                    $fresh->getQuery()->wheres = $this->builder->getQuery()->wheres;
+                    $fresh->getQuery()->bindings = $this->builder->getQuery()->bindings;
+
+                    return $callback($shard, $fresh);
+                });
+            });
+        }
+
+        try {
+            $tolerateDeadShards = config('shardwise.dead_shard_tolerance', false);
+
+            if ($tolerateDeadShards) {
+                [$errors, $results] = \Amp\Future\awaitAll($futures);
+            } else {
+                $results = \Amp\Future\await($futures);
+            }
+
+            foreach ($results as $shardId => $result) {
+                $this->shardResults[$shardId] = $result;
+            }
+        } catch (Throwable) {
             $this->executeOnShardsSequential($callback);
         }
     }

@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Pagination\LengthAwarePaginator;
+use Throwable;
 
 /**
  * Paginator for cross-shard queries.
@@ -137,17 +138,38 @@ final class CrossShardPaginator
         ?string $orderByColumn,
         string $orderDirection,
     ): Collection {
-        $allItems = new Collection;
-
         $shards = shardwise()->getShards()->active();
+        $useAmphp = config('shardwise.parallel_queries.enabled', false)
+            && config('shardwise.parallel_queries.driver', 'amphp') === 'amphp'
+            && $shards->count() > 1
+            && class_exists(\Amp\Postgres\PostgresConnectionPool::class);
+
+        if ($useAmphp) {
+            return $this->fetchFromAllShardsAmphp($shards, $columns, $limit, $orderByColumn, $orderDirection);
+        }
+
+        return $this->fetchFromAllShardsSequential($shards, $columns, $limit, $orderByColumn, $orderDirection);
+    }
+
+    /**
+     * Fetch from all shards sequentially.
+     *
+     * @param  array<int, string>  $columns
+     * @return Collection<int, TModel>
+     */
+    private function fetchFromAllShardsSequential(
+        \Skylence\Shardwise\ShardCollection $shards,
+        array $columns,
+        int $limit,
+        ?string $orderByColumn,
+        string $orderDirection,
+    ): Collection {
+        $allItems = new Collection;
 
         foreach ($shards as $shard) {
             $shardItems = shardwise()->run($shard, function () use ($shard, $columns, $limit, $orderByColumn, $orderDirection): Collection {
-                // Build a fresh query on the shard connection
                 $model = $this->builder->getModel();
                 $query = $model->on($shard->getConnectionName())->newQuery();
-
-                // Re-apply wheres and bindings from the original builder
                 $query->getQuery()->wheres = $this->builder->getQuery()->wheres;
                 $query->getQuery()->bindings = $this->builder->getQuery()->bindings;
 
@@ -155,7 +177,6 @@ final class CrossShardPaginator
                     $query->orderBy($orderByColumn, $orderDirection);
                 }
 
-                // Each shard fetches the full limit to handle uneven distribution
                 return $query->take($limit)->get($columns);
             });
 
@@ -163,6 +184,53 @@ final class CrossShardPaginator
         }
 
         return $allItems;
+    }
+
+    /**
+     * Fetch from all shards concurrently using AmPHP Fibers.
+     *
+     * @param  array<int, string>  $columns
+     * @return Collection<int, TModel>
+     */
+    private function fetchFromAllShardsAmphp(
+        \Skylence\Shardwise\ShardCollection $shards,
+        array $columns,
+        int $limit,
+        ?string $orderByColumn,
+        string $orderDirection,
+    ): Collection {
+        // Build SQL from builder
+        $model = $this->builder->getModel();
+        $fresh = $model->newQuery();
+        $fresh->getQuery()->wheres = $this->builder->getQuery()->wheres;
+        $fresh->getQuery()->bindings = $this->builder->getQuery()->bindings;
+
+        if ($orderByColumn !== null) {
+            $fresh->orderBy($orderByColumn, $orderDirection);
+        }
+        $fresh->take($limit);
+        $fresh->select($columns);
+
+        $sql = $fresh->toSql();
+        $bindings = $fresh->getBindings();
+        $tolerateDeadShards = config('shardwise.dead_shard_tolerance', false);
+
+        try {
+            $shardResults = \Skylence\Shardwise\Async\AsyncShardQueryExecutor::queryAll(
+                $shards, $sql, $bindings, $tolerateDeadShards
+            );
+
+            $allItems = new Collection;
+            foreach ($shardResults as $rows) {
+                foreach ($rows as $row) {
+                    $allItems->push($model->newFromBuilder((object) $row));
+                }
+            }
+
+            return $allItems;
+        } catch (Throwable) {
+            return $this->fetchFromAllShardsSequential($shards, $columns, $limit, $orderByColumn, $orderDirection);
+        }
     }
 
     /**
