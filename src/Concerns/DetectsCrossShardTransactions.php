@@ -78,6 +78,19 @@ trait DetectsCrossShardTransactions
     }
 
     /**
+     * Flush all cross-shard transaction detection state.
+     *
+     * This is critical for long-running processes (Octane, Swoole, RoadRunner)
+     * to prevent cross-request data leaks.
+     */
+    public static function flushTransactionState(): void
+    {
+        self::$transactionShards = [];
+        self::$detectCrossShardTransactions = true;
+        self::$strictCrossShardTransactions = false;
+    }
+
+    /**
      * Get the shards accessed in the current transaction.
      *
      * @return array<int, string>

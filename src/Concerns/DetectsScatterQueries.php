@@ -74,6 +74,19 @@ trait DetectsScatterQueries
     }
 
     /**
+     * Flush all scatter detection state.
+     *
+     * This is critical for long-running processes (Octane, Swoole, RoadRunner)
+     * to prevent cross-request data leaks.
+     */
+    public static function flushScatterState(): void
+    {
+        self::$detectScatterQueries = true;
+        self::$logScatterQueries = true;
+        self::$scatterQueryCallback = null;
+    }
+
+    /**
      * Log a scatter query warning.
      *
      * @param  array<int, mixed>  $bindings

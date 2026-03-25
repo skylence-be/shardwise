@@ -57,6 +57,21 @@ final class ShardMetrics
     }
 
     /**
+     * Flush the singleton instance and all collected metrics.
+     *
+     * This is critical for long-running processes (Octane, Swoole, RoadRunner)
+     * to prevent cross-request data leaks.
+     */
+    public static function flush(): void
+    {
+        if (self::$instance !== null) {
+            self::$instance->reset();
+        }
+
+        self::$instance = null;
+    }
+
+    /**
      * Enable metrics collection.
      */
     public function enable(): void

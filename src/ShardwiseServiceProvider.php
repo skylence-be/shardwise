@@ -24,8 +24,10 @@ use Skylence\Shardwise\Contracts\ShardRouterInterface;
 use Skylence\Shardwise\Contracts\ShardStrategyInterface;
 use Skylence\Shardwise\Health\ShardHealthChecker;
 use Skylence\Shardwise\Macros\QueryBuilderMacros;
+use Skylence\Shardwise\Metrics\ShardMetrics;
 use Skylence\Shardwise\Migrations\ShardMigrationRepository;
 use Skylence\Shardwise\Migrations\ShardMigrator;
+use Skylence\Shardwise\Query\CrossShardBuilder;
 use Skylence\Shardwise\Routing\ShardRouter;
 use Skylence\Shardwise\Routing\Strategies\ConsistentHashStrategy;
 use Skylence\Shardwise\Routing\Strategies\ModuloStrategy;
@@ -68,6 +70,7 @@ final class ShardwiseServiceProvider extends PackageServiceProvider
         $this->bootShards();
         $this->registerMacros();
         $this->registerQueueIntegration();
+        $this->registerOctaneCompatibility();
     }
 
     private function registerConnections(): void
@@ -203,8 +206,8 @@ final class ShardwiseServiceProvider extends PackageServiceProvider
         });
 
         // Register metrics singleton
-        $this->app->singleton(Metrics\ShardMetrics::class, function (): Metrics\ShardMetrics {
-            return Metrics\ShardMetrics::getInstance();
+        $this->app->singleton(ShardMetrics::class, function (): ShardMetrics {
+            return ShardMetrics::getInstance();
         });
     }
 
@@ -301,5 +304,29 @@ final class ShardwiseServiceProvider extends PackageServiceProvider
                 shardwise()->end();
             }
         });
+    }
+
+    /**
+     * Register Octane/Swoole/RoadRunner compatibility listeners.
+     *
+     * Flushes all static mutable state between requests to prevent
+     * cross-request data leaks in long-running processes.
+     */
+    private function registerOctaneCompatibility(): void
+    {
+        $flush = function (): void {
+            ShardContext::clear();
+            ShardContext::flushTransactionState();
+            ShardMetrics::flush();
+            CrossShardBuilder::flushScatterState();
+        };
+
+        if (class_exists(\Laravel\Octane\Events\RequestTerminated::class)) {
+            $this->app['events']->listen(\Laravel\Octane\Events\RequestTerminated::class, $flush);
+        }
+
+        if (class_exists(\Laravel\Octane\Events\TaskTerminated::class)) {
+            $this->app['events']->listen(\Laravel\Octane\Events\TaskTerminated::class, $flush);
+        }
     }
 }

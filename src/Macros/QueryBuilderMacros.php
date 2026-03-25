@@ -43,9 +43,9 @@ final class QueryBuilderMacros
         });
 
         /**
-         * Execute the query on all shards and merge results.
+         * Execute the query on all shards and merge results immediately.
          */
-        Builder::macro('onAllShards', function (): Collection {
+        Builder::macro('getFromAllShards', function (): Collection {
             /** @var Builder $this */
             $results = new Collection;
 
@@ -115,9 +115,9 @@ final class QueryBuilderMacros
         });
 
         /**
-         * Execute the query on all shards and merge results.
+         * Execute the query on all shards and merge results immediately.
          */
-        QueryBuilder::macro('onAllShards', function (): \Illuminate\Support\Collection {
+        QueryBuilder::macro('getFromAllShards', function (): \Illuminate\Support\Collection {
             /** @var QueryBuilder $this */
             $results = collect();
 

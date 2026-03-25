@@ -28,8 +28,9 @@ final class CacheBootstrapper implements BootstrapperInterface
         $store = $this->cacheManager->store();
 
         if ($store instanceof Repository) {
-            $this->previousPrefix = $this->getPrefix($store);
-            $this->setPrefix($store, "shard:{$shard->getId()}:");
+            $currentPrefix = $this->getPrefix($store);
+            $this->previousPrefix = $currentPrefix;
+            $this->setPrefix($store, $currentPrefix."shard:{$shard->getId()}:");
         }
     }
 

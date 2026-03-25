@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Skylence\Shardwise\Routing\Strategies;
 
+use Illuminate\Support\Facades\Log;
 use Skylence\Shardwise\Contracts\ShardInterface;
 use Skylence\Shardwise\Contracts\ShardStrategyInterface;
 use Skylence\Shardwise\Exceptions\ShardingException;
@@ -44,7 +45,9 @@ final class RangeStrategy implements ShardStrategyInterface
             }
         }
 
-        // If no range matches, use the last shard (catch-all for overflow)
+        // If no range matches, fall back to the last shard (catch-all for overflow)
+        Log::warning("No range matched for key '{$key}', falling back to last shard.");
+
         $lastShard = null;
         foreach ($shards as $shard) {
             $lastShard = $shard;
@@ -82,7 +85,7 @@ final class RangeStrategy implements ShardStrategyInterface
             return $key;
         }
 
-        // For string keys, use a hash to convert to numeric
-        return abs((int) crc32($key));
+        // For string keys, use a hash to convert to non-negative numeric
+        return crc32($key) & 0x7FFFFFFF;
     }
 }

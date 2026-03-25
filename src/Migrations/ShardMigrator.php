@@ -24,13 +24,14 @@ final class ShardMigrator
      */
     public function migrate(ShardInterface $shard, bool $force = false): void
     {
-        $this->manager->run($shard, function () use ($force): void {
+        $this->manager->run($shard, function () use ($shard, $force): void {
             $path = $this->getMigrationPath();
 
             Artisan::call('migrate', [
                 '--path' => $path,
                 '--realpath' => true,
                 '--force' => $force,
+                '--database' => $shard->getConnectionName(),
             ]);
         });
     }
@@ -40,13 +41,14 @@ final class ShardMigrator
      */
     public function rollback(ShardInterface $shard, int $step = 1): void
     {
-        $this->manager->run($shard, function () use ($step): void {
+        $this->manager->run($shard, function () use ($shard, $step): void {
             $path = $this->getMigrationPath();
 
             Artisan::call('migrate:rollback', [
                 '--path' => $path,
                 '--realpath' => true,
                 '--step' => $step,
+                '--database' => $shard->getConnectionName(),
             ]);
         });
     }
@@ -56,13 +58,14 @@ final class ShardMigrator
      */
     public function fresh(ShardInterface $shard, bool $force = false): void
     {
-        $this->manager->run($shard, function () use ($force): void {
+        $this->manager->run($shard, function () use ($shard, $force): void {
             $path = $this->getMigrationPath();
 
             Artisan::call('migrate:fresh', [
                 '--path' => $path,
                 '--realpath' => true,
                 '--force' => $force,
+                '--database' => $shard->getConnectionName(),
             ]);
         });
     }
@@ -72,12 +75,13 @@ final class ShardMigrator
      */
     public function reset(ShardInterface $shard): void
     {
-        $this->manager->run($shard, function (): void {
+        $this->manager->run($shard, function () use ($shard): void {
             $path = $this->getMigrationPath();
 
             Artisan::call('migrate:reset', [
                 '--path' => $path,
                 '--realpath' => true,
+                '--database' => $shard->getConnectionName(),
             ]);
         });
     }
@@ -87,8 +91,10 @@ final class ShardMigrator
      */
     public function seed(ShardInterface $shard, ?string $class = null): void
     {
-        $this->manager->run($shard, function () use ($class): void {
-            $options = [];
+        $this->manager->run($shard, function () use ($shard, $class): void {
+            $options = [
+                '--database' => $shard->getConnectionName(),
+            ];
 
             if ($class !== null) {
                 $options['--class'] = $class;

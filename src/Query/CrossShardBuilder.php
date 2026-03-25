@@ -108,8 +108,8 @@ final class CrossShardBuilder
     {
         $results = new Collection;
 
-        $this->executeOnShards(function () use ($columns, &$results): void {
-            $shardResults = $this->builder->get($columns);
+        $this->executeOnShards(function (ShardInterface $shard, Builder $clone) use ($columns, &$results): void {
+            $shardResults = $clone->get($columns);
             $results = $results->merge($shardResults);
         });
 
@@ -157,10 +157,14 @@ final class CrossShardBuilder
         $shards = $this->targetShards;
         $builder = $this->builder;
 
-        return LazyCollection::make(function () use ($shards, $builder) {
+        return LazyCollection::make(function () use ($shards, $columns, $builder) {
             foreach ($shards ?? [] as $shard) {
-                yield from shardwise()->run($shard, function () use ($builder): LazyCollection {
-                    return $builder->cursor();
+                yield from shardwise()->run($shard, function () use ($columns, $builder): LazyCollection {
+                    /** @var Builder<TModel> $clone */
+                    $clone = $builder->clone();
+                    $clone->select($columns);
+
+                    return $clone->cursor();
                 });
             }
         });
@@ -177,7 +181,9 @@ final class CrossShardBuilder
     {
         foreach ($this->targetShards ?? [] as $shard) {
             $shouldContinue = shardwise()->run($shard, function () use ($chunkSize, $callback, $shard): bool {
-                return $this->builder->chunk($chunkSize, function (BaseCollection $chunk, int $page) use ($callback, $shard): bool {
+                $clone = $this->cloneBuilder();
+
+                return $clone->chunk($chunkSize, function (BaseCollection $chunk, int $page) use ($callback, $shard): bool {
                     /** @var Collection<int, TModel> $chunk */
                     $result = $callback($chunk, $shard);
 
@@ -204,7 +210,9 @@ final class CrossShardBuilder
     {
         foreach ($this->targetShards ?? [] as $shard) {
             $shouldContinue = shardwise()->run($shard, function () use ($chunkSize, $callback, $column, $alias, $shard): bool {
-                return $this->builder->chunkById($chunkSize, function (BaseCollection $chunk, int $page) use ($callback, $shard): bool {
+                $clone = $this->cloneBuilder();
+
+                return $clone->chunkById($chunkSize, function (BaseCollection $chunk, int $page) use ($callback, $shard): bool {
                     /** @var Collection<int, TModel> $chunk */
                     $result = $callback($chunk, $shard);
 
@@ -247,8 +255,8 @@ final class CrossShardBuilder
     {
         $total = 0;
 
-        $this->executeOnShards(function () use ($column, &$total): void {
-            $total += $this->builder->count($column);
+        $this->executeOnShards(function (ShardInterface $shard, Builder $clone) use ($column, &$total): void {
+            $total += $clone->count($column);
         });
 
         return $total;
@@ -261,9 +269,9 @@ final class CrossShardBuilder
     {
         $total = 0.0;
 
-        $this->executeOnShards(function () use ($column, &$total): void {
+        $this->executeOnShards(function (ShardInterface $shard, Builder $clone) use ($column, &$total): void {
             /** @var int|float $shardSum */
-            $shardSum = $this->builder->sum($column);
+            $shardSum = $clone->sum($column);
             $total += $shardSum;
         });
 
@@ -278,10 +286,10 @@ final class CrossShardBuilder
         $sum = 0.0;
         $count = 0;
 
-        $this->executeOnShards(function () use ($column, &$sum, &$count): void {
+        $this->executeOnShards(function (ShardInterface $shard, Builder $clone) use ($column, &$sum, &$count): void {
             /** @var int|float $shardSum */
-            $shardSum = $this->builder->sum($column);
-            $shardCount = $this->builder->count();
+            $shardSum = $clone->sum($column);
+            $shardCount = $clone->count();
 
             $sum += $shardSum;
             $count += $shardCount;
@@ -297,8 +305,8 @@ final class CrossShardBuilder
     {
         $values = [];
 
-        $this->executeOnShards(function () use ($column, &$values): void {
-            $value = $this->builder->min($column);
+        $this->executeOnShards(function (ShardInterface $shard, Builder $clone) use ($column, &$values): void {
+            $value = $clone->min($column);
             if ($value !== null) {
                 $values[] = $value;
             }
@@ -314,8 +322,8 @@ final class CrossShardBuilder
     {
         $values = [];
 
-        $this->executeOnShards(function () use ($column, &$values): void {
-            $value = $this->builder->max($column);
+        $this->executeOnShards(function (ShardInterface $shard, Builder $clone) use ($column, &$values): void {
+            $value = $clone->max($column);
             if ($value !== null) {
                 $values[] = $value;
             }
@@ -330,7 +338,7 @@ final class CrossShardBuilder
     public function exists(): bool
     {
         foreach ($this->targetShards ?? [] as $shard) {
-            $exists = shardwise()->run($shard, fn (): bool => $this->builder->exists());
+            $exists = shardwise()->run($shard, fn (): bool => $this->cloneBuilder()->exists());
 
             if ($exists) {
                 return true;
@@ -351,8 +359,8 @@ final class CrossShardBuilder
         /** @var BaseCollection<string, Collection<int, TModel>> $grouped */
         $grouped = collect();
 
-        $this->executeOnShards(function (ShardInterface $shard) use ($columns, &$grouped): void {
-            $results = $this->builder->get($columns);
+        $this->executeOnShards(function (ShardInterface $shard, Builder $clone) use ($columns, &$grouped): void {
+            $results = $clone->get($columns);
             $grouped->put($shard->getId(), $results);
         });
 
@@ -369,8 +377,8 @@ final class CrossShardBuilder
         /** @var BaseCollection<string, int> $grouped */
         $grouped = collect();
 
-        $this->executeOnShards(function (ShardInterface $shard) use ($column, &$grouped): void {
-            $count = $this->builder->count($column);
+        $this->executeOnShards(function (ShardInterface $shard, Builder $clone) use ($column, &$grouped): void {
+            $count = $clone->count($column);
             $grouped->put($shard->getId(), $count);
         });
 
@@ -388,7 +396,25 @@ final class CrossShardBuilder
     }
 
     /**
+     * Create a deep clone of the builder to avoid shared connection/query state between shards.
+     *
+     * @return Builder<TModel>
+     */
+    private function cloneBuilder(): Builder
+    {
+        /** @var Builder<TModel> $clone */
+        $clone = $this->builder->clone();
+
+        return $clone;
+    }
+
+    /**
      * Execute a callback on each target shard.
+     *
+     * A deep-cloned builder is passed to the callback to prevent shared
+     * connection/query state between shard iterations.
+     *
+     * @param  callable(ShardInterface, Builder<TModel>): mixed  $callback
      */
     private function executeOnShards(callable $callback): void
     {
@@ -406,7 +432,9 @@ final class CrossShardBuilder
 
         foreach ($this->targetShards ?? [] as $shard) {
             shardwise()->run($shard, function () use ($shard, $callback): void {
-                $result = $callback($shard);
+                // Deep-clone the builder for each shard to avoid shared connection state
+                $clone = $this->cloneBuilder();
+                $result = $callback($shard, $clone);
                 $this->shardResults[$shard->getId()] = $result;
             });
         }

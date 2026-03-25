@@ -79,7 +79,7 @@ trait Shardable
     public function getShardKeyColumn(): string
     {
         /** @var string */
-        return $this->shardKeyColumn ?? $this->getKeyName();
+        return property_exists($this, 'shardKeyColumn') ? $this->shardKeyColumn : $this->getKeyName();
     }
 
     /**
@@ -97,7 +97,7 @@ trait Shardable
      */
     public function getTableGroup(): ?string
     {
-        return $this->tableGroup ?? null;
+        return property_exists($this, 'tableGroup') ? $this->tableGroup : null;
     }
 
     /**
@@ -131,7 +131,7 @@ trait Shardable
      */
     public function usesShardAwareUuid(): bool
     {
-        return $this->shardAwareUuid ?? false;
+        return property_exists($this, 'shardAwareUuid') ? $this->shardAwareUuid : false;
     }
 
     /**

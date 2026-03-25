@@ -7,6 +7,7 @@ namespace Skylence\Shardwise\Connections;
 use Illuminate\Database\Connection;
 use Illuminate\Database\DatabaseManager;
 use Skylence\Shardwise\Contracts\ShardInterface;
+use Skylence\Shardwise\Exceptions\ConnectionPoolExhaustedException;
 
 /**
  * Connection pool for managing shard database connections with limits.
@@ -155,14 +156,10 @@ final class ConnectionPool
 
     private function waitForConnection(string $connectionName): void
     {
-        // In a real implementation, this would wait for a connection to be released
-        // For now, we'll just cleanup and try again
         $this->cleanupIdleConnections();
 
-        // If still at max, force release the oldest
         if ($this->getActiveCount($connectionName) >= $this->maxConnections) {
-            $this->database->purge($connectionName);
-            $this->activeConnections[$connectionName] = 0;
+            throw ConnectionPoolExhaustedException::forConnection($connectionName, $this->maxConnections);
         }
     }
 }

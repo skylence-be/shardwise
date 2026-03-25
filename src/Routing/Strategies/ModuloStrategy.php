@@ -71,7 +71,7 @@ final class ModuloStrategy implements ShardStrategyInterface
             return abs($key);
         }
 
-        // For string keys, use a hash to convert to numeric
-        return abs((int) crc32($key));
+        // For string keys, use a hash to convert to non-negative numeric
+        return crc32($key) & 0x7FFFFFFF;
     }
 }

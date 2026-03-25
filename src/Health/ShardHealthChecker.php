@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Skylence\Shardwise\Health;
 
 use Illuminate\Database\DatabaseManager;
+use PDO;
 use Skylence\Shardwise\Connections\ShardConnectionFactory;
 use Skylence\Shardwise\Contracts\ShardInterface;
 use Skylence\Shardwise\ShardCollection;
@@ -39,8 +40,12 @@ final class ShardHealthChecker
             /** @var int $timeout */
             $timeout = config('shardwise.health.timeout', 5);
 
-            // Set a timeout on the connection
-            $connection->statement("SET statement_timeout = {$timeout}000");
+            // Set a timeout on the connection (driver-agnostic)
+            try {
+                $connection->getPdo()->setAttribute(PDO::ATTR_TIMEOUT, $timeout);
+            } catch (Throwable) {
+                // Some drivers may not support PDO::ATTR_TIMEOUT
+            }
 
             // Execute health check query
             $connection->select($query);

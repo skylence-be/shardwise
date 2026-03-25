@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Skylence\Shardwise\Routing;
 
+use InvalidArgumentException;
 use Skylence\Shardwise\Contracts\ShardInterface;
 use Skylence\Shardwise\Exceptions\ShardingException;
 
@@ -47,7 +48,11 @@ final class ConsistentHashRing
     public function __construct(
         private readonly int $virtualNodes = 150,
         private readonly string $hashAlgorithm = 'xxh128',
-    ) {}
+    ) {
+        if (! in_array($hashAlgorithm, hash_algos(), true)) {
+            throw new InvalidArgumentException("Hash algorithm '{$hashAlgorithm}' is not available.");
+        }
+    }
 
     /**
      * Add a shard to the ring.

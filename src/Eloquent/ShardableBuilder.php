@@ -12,6 +12,7 @@ use Illuminate\Support\LazyCollection;
 use Skylence\Shardwise\Contracts\ShardableInterface;
 use Skylence\Shardwise\Contracts\ShardInterface;
 use Skylence\Shardwise\Query\CrossShardBuilder;
+use Skylence\Shardwise\Uuid\UuidShardDecoder;
 
 /**
  * Shard-aware Eloquent query builder.
@@ -166,11 +167,21 @@ final class ShardableBuilder extends Builder
      */
     public function find($id, $columns = ['*']): Model|Collection|null
     {
-        // If model uses shardable trait and key is a UUID, try to route via UUID
-        if (is_string($id) && $this->model instanceof ShardableInterface) {
+        // If no shard is targeted yet, try to decode shard from UUID
+        if ($this->targetShard === null && ! $this->allShards && is_string($id)) {
+            $decoder = UuidShardDecoder::fromConfig(shardwise()->getShards());
+            $shard = $decoder->decode($id);
+
+            if ($shard !== null) {
+                return $this->onShard($shard)->find($id, $columns);
+            }
+        }
+
+        // Fallback: try model's resolveShard() if model has attributes set
+        if ($this->targetShard === null && ! $this->allShards && $this->model instanceof ShardableInterface) {
             $shard = $this->model->resolveShard();
 
-            if ($shard !== null && $this->targetShard === null && ! $this->allShards) {
+            if ($shard !== null) {
                 return $this->onShard($shard)->find($id, $columns);
             }
         }
@@ -195,8 +206,8 @@ final class ShardableBuilder extends Builder
 
         foreach ($shards as $shard) {
             $shardResults = shardwise()->run($shard, function () use ($columns): Collection {
-                // Clone the query and reset the all-shards flag to avoid recursion
-                $clone = clone $this;
+                // Deep-clone the builder (including underlying query) to avoid shared connection state
+                $clone = $this->clone();
                 $clone->allShards = false;
 
                 // Call get() on the clone, which will now use parent::get() since allShards is false
@@ -220,8 +231,8 @@ final class ShardableBuilder extends Builder
 
         foreach ($shards as $shard) {
             $count = shardwise()->run($shard, function () use ($columns): int {
-                // Clone the query and reset the all-shards flag to avoid recursion
-                $clone = clone $this;
+                // Deep-clone the builder (including underlying query) to avoid shared connection state
+                $clone = $this->clone();
                 $clone->allShards = false;
 
                 // Call count() on the clone, which will now use parent::count() since allShards is false
@@ -248,7 +259,8 @@ final class ShardableBuilder extends Builder
 
             foreach ($shards as $shard) {
                 yield from shardwise()->run($shard, function () use ($builder, $chunkSize): LazyCollection {
-                    $clone = clone $builder;
+                    // Deep-clone the builder (including underlying query) to avoid shared connection state
+                    $clone = $builder->clone();
                     $clone->allShards = false;
 
                     return $clone->lazy($chunkSize);
@@ -271,7 +283,8 @@ final class ShardableBuilder extends Builder
 
             foreach ($shards as $shard) {
                 yield from shardwise()->run($shard, function () use ($builder): LazyCollection {
-                    $clone = clone $builder;
+                    // Deep-clone the builder (including underlying query) to avoid shared connection state
+                    $clone = $builder->clone();
                     $clone->allShards = false;
 
                     return $clone->cursor();

@@ -14,7 +14,8 @@ use Skylence\Shardwise\ShardContext;
  */
 final class ShardDatabaseManager
 {
-    private ?string $previousConnection = null;
+    /** @var array<int, string> */
+    private array $previousConnections = [];
 
     public function __construct(
         private readonly DatabaseManager $database,
@@ -26,7 +27,7 @@ final class ShardDatabaseManager
      */
     public function connectToShard(ShardInterface $shard): Connection
     {
-        $this->previousConnection = $this->database->getDefaultConnection();
+        $this->previousConnections[] = $this->database->getDefaultConnection();
 
         $connection = $this->factory->make($shard);
 
@@ -40,9 +41,10 @@ final class ShardDatabaseManager
      */
     public function disconnectFromShard(): void
     {
-        if ($this->previousConnection !== null) {
-            $this->database->setDefaultConnection($this->previousConnection);
-            $this->previousConnection = null;
+        $previousConnection = array_pop($this->previousConnections);
+
+        if ($previousConnection !== null) {
+            $this->database->setDefaultConnection($previousConnection);
         }
     }
 

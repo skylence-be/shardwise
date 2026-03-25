@@ -78,7 +78,7 @@ final class ShardableQueryBuilder extends Builder
      * @param  array<int, string>|string  $columns
      * @return \Illuminate\Support\Collection<int, stdClass>
      */
-    public function get($columns = ['*'])
+    public function get($columns = ['*']): \Illuminate\Support\Collection
     {
         if ($this->allShards) {
             return $this->getFromAllShards($columns);
@@ -116,12 +116,26 @@ final class ShardableQueryBuilder extends Builder
     }
 
     /**
+     * Create a deep clone of this query builder, ensuring connection, grammar,
+     * and processor are not shared with the original instance.
+     */
+    private function deepClone(): self
+    {
+        $clone = clone $this;
+        $clone->connection = clone $this->connection;
+        $clone->grammar = clone $this->grammar;
+        $clone->processor = clone $this->processor;
+
+        return $clone;
+    }
+
+    /**
      * Get results from all shards and merge them.
      *
      * @param  array<int, string>|string  $columns
      * @return \Illuminate\Support\Collection<int, stdClass>
      */
-    private function getFromAllShards(array|string $columns = ['*'])
+    private function getFromAllShards(array|string $columns = ['*']): \Illuminate\Support\Collection
     {
         /** @var array<int, string> $columns */
         $columns = is_array($columns) ? $columns : func_get_args();
@@ -132,8 +146,8 @@ final class ShardableQueryBuilder extends Builder
 
         foreach ($shards as $shard) {
             $shardResults = shardwise()->run($shard, function () use ($columns) {
-                // Clone the query and reset the all-shards flag to avoid recursion
-                $clone = clone $this;
+                // Deep-clone the query to avoid shared connection/grammar/processor state
+                $clone = $this->deepClone();
                 $clone->allShards = false;
 
                 // Call get() on the clone, which will now use parent::get() since allShards is false
@@ -157,8 +171,8 @@ final class ShardableQueryBuilder extends Builder
 
         foreach ($shards as $shard) {
             $count = shardwise()->run($shard, function () use ($columns): int {
-                // Clone the query and reset the all-shards flag to avoid recursion
-                $clone = clone $this;
+                // Deep-clone the query to avoid shared connection/grammar/processor state
+                $clone = $this->deepClone();
                 $clone->allShards = false;
 
                 // Call count() on the clone, which will now use parent::count() since allShards is false
@@ -182,8 +196,8 @@ final class ShardableQueryBuilder extends Builder
 
         foreach ($shards as $shard) {
             $sum = shardwise()->run($shard, function () use ($column): int|float {
-                // Clone the query and reset the all-shards flag to avoid recursion
-                $clone = clone $this;
+                // Deep-clone the query to avoid shared connection/grammar/processor state
+                $clone = $this->deepClone();
                 $clone->allShards = false;
 
                 // Call sum() on the clone, which will now use parent::sum() since allShards is false
