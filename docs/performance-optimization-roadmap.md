@@ -306,11 +306,45 @@ The package should declare `pgsql` as a requirement and document this clearly.
 
 ---
 
-## Implementation Priority
+## Implementation Status
 
-1. **Co-location routing** (lowest effort, highest per-query impact) — 1 day
-2. **Parallel queries** (medium effort, fixes the serial bottleneck) — 2-3 days
-3. **postgres_fdw integration** (highest effort, near-native performance) — 3-5 days
+| Optimization | Status | Result |
+|---|---|---|
+| **Co-location routing** | Implemented, enabled by default | Keyed queries: 0.08ms (matches single DB's 0.07ms) |
+| **Parallel queries (Laravel Concurrency)** | Implemented, opt-in | **Not viable** — process spawn overhead (~60ms) destroys sub-ms query gains |
+| **postgres_fdw** | Artisan commands implemented | Setup tooling ready, needs production testing |
+
+### Parallel Queries: Benchmark Findings
+
+Laravel's `Concurrency` facade forks a new PHP process per shard query. With 3 shards:
+
+| Metric | Sequential | Parallel (Concurrency) |
+|--------|:----------:|:---------------------:|
+| Project::count() | 0.61 ms | 58.17 ms |
+| Dashboard (5 counts) | 3.50 ms | 200.36 ms |
+
+The ~60ms process spawning overhead per fork makes this **93x slower** for sub-millisecond queries. Laravel Concurrency is designed for slow operations (API calls >200ms), not fast DB queries.
+
+### Future Option: AmPHP Worker Pools
+
+For parallel queries to be viable, the package would need [`amphp/parallel`](https://packagist.org/packages/amphp/parallel) with **persistent worker pools** and [`amphp/postgres`](https://amphp.org/postgres) for async non-blocking I/O:
+
+| | Laravel Concurrency | AmPHP Parallel |
+|---|---|---|
+| How it works | Forks new PHP process per call | Pre-spawned worker pool, reuses processes |
+| Startup cost | ~60ms per fork | ~0ms (workers already running) |
+| DB connections | Each process opens its own | Persistent connection pool |
+| Best for | Slow tasks (API calls, >200ms) | Fast concurrent I/O (DB queries, <10ms) |
+
+With `amphp/postgres`, 3 shard queries would run simultaneously on a **single thread** using PHP 8.1+ Fibers — no process spawning, no serialization overhead. Expected result: ~0.2ms for a 3-shard count (matching single-DB performance).
+
+**Why it's not implemented yet:**
+- Replaces PDO with amphp's own connection layer — significant architectural change
+- Requires running an event loop, which conflicts with Laravel's synchronous request lifecycle
+- Would work best with Laravel Octane (Swoole/FrankenPHP) where the event loop persists between requests
+- Testing complexity increases significantly
+
+This remains the most promising path to eliminating cross-shard overhead entirely while keeping application-level sharding.
 
 ## References
 
