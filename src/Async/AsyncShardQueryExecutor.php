@@ -155,6 +155,21 @@ final class AsyncShardQueryExecutor
     }
 
     /**
+     * Pre-warm connection pools for all active shards.
+     *
+     * Call this on app boot (e.g., in a service provider or Octane listener)
+     * to eliminate first-query connection setup overhead.
+     */
+    public static function warmPools(?ShardCollection $shards = null): void
+    {
+        $shards ??= shardwise()->getShards()->active();
+
+        foreach ($shards as $shard) {
+            self::getPool($shard);
+        }
+    }
+
+    /**
      * Close all connection pools and reset the pool cache.
      */
     public static function closeAll(): void

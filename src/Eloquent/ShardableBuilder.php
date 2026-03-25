@@ -150,7 +150,8 @@ final class ShardableBuilder extends Builder
                 }
             }
 
-            return $this->crossShard()->sum($column);
+            return $this->aggregateFromAllShardsAmphpOrFallback('sum', $column)
+                ?? $this->crossShard()->sum($column);
         }
 
         return (float) parent::sum($column);
@@ -158,6 +159,8 @@ final class ShardableBuilder extends Builder
 
     /**
      * Get the average of a column from all shards.
+     *
+     * Uses weighted average (total sum / total count) for correctness.
      *
      * @param  string  $column
      */
@@ -168,6 +171,34 @@ final class ShardableBuilder extends Builder
                 $targetShard = $this->resolveShardFromConstraints();
                 if ($targetShard !== null) {
                     return $this->onShard($targetShard)->avg($column);
+                }
+            }
+
+            // For avg, we need both sum and count — fire both concurrently
+            $shards = shardwise()->getShards()->active();
+            if ($this->isAmphpAvailable() && $shards->count() > 1) {
+                try {
+                    $sumSql = $this->buildAggregateSql("sum({$column})");
+                    $countSql = $this->buildAggregateSql('count(*)');
+                    $bindings = $this->getAggregateBindings();
+                    $tolerant = (bool) config('shardwise.dead_shard_tolerance', false);
+
+                    [$sumResults, $countResults] = AsyncShardQueryExecutor::dualQueryAll(
+                        $shards, $sumSql, $bindings, $countSql, $bindings, $tolerant
+                    );
+
+                    $totalSum = 0.0;
+                    $totalCount = 0;
+                    foreach ($sumResults as $v) {
+                        $totalSum += (float) $v;
+                    }
+                    foreach ($countResults as $v) {
+                        $totalCount += (int) $v;
+                    }
+
+                    return $totalCount > 0 ? $totalSum / $totalCount : 0.0;
+                } catch (Throwable) {
+                    // Fall through to CrossShardBuilder
                 }
             }
 
@@ -192,7 +223,8 @@ final class ShardableBuilder extends Builder
                 }
             }
 
-            return $this->crossShard()->min($column);
+            return $this->aggregateFromAllShardsAmphpOrFallback('min', $column)
+                ?? $this->crossShard()->min($column);
         }
 
         return parent::min($column);
@@ -213,7 +245,8 @@ final class ShardableBuilder extends Builder
                 }
             }
 
-            return $this->crossShard()->max($column);
+            return $this->aggregateFromAllShardsAmphpOrFallback('max', $column)
+                ?? $this->crossShard()->max($column);
         }
 
         return parent::max($column);
@@ -656,6 +689,88 @@ final class ShardableBuilder extends Builder
         }
 
         return $total;
+    }
+
+    /**
+     * Check if AmPHP async driver is available and enabled.
+     */
+    private function isAmphpAvailable(): bool
+    {
+        return config('shardwise.parallel_queries.enabled', false)
+            && config('shardwise.parallel_queries.driver', 'amphp') === 'amphp'
+            && class_exists(PostgresConnectionPool::class);
+    }
+
+    /**
+     * Build aggregate SQL directly, bypassing Eloquent builder overhead.
+     */
+    private function buildAggregateSql(string $aggregateExpr): string
+    {
+        $model = $this->getModel();
+        $wheres = $this->getQuery()->wheres;
+
+        if (empty($wheres)) {
+            return "select {$aggregateExpr} as aggregate from \"{$model->getTable()}\"";
+        }
+
+        // Use Eloquent grammar for complex WHERE clauses
+        $fresh = $model->newQuery();
+        $fresh->getQuery()->wheres = $wheres;
+        $fresh->getQuery()->bindings = $this->getQuery()->bindings;
+        $fresh->selectRaw("{$aggregateExpr} as aggregate");
+
+        return $fresh->toSql();
+    }
+
+    /**
+     * Get bindings for aggregate queries.
+     *
+     * @return array<int, mixed>
+     */
+    private function getAggregateBindings(): array
+    {
+        $wheres = $this->getQuery()->wheres;
+
+        if (empty($wheres)) {
+            return [];
+        }
+
+        $model = $this->getModel();
+        $fresh = $model->newQuery();
+        $fresh->getQuery()->wheres = $wheres;
+        $fresh->getQuery()->bindings = $this->getQuery()->bindings;
+        $fresh->selectRaw('1');
+
+        return $fresh->getBindings();
+    }
+
+    /**
+     * Try to run an aggregate via AmPHP, return null to fall through to CrossShardBuilder.
+     */
+    private function aggregateFromAllShardsAmphpOrFallback(string $function, string $column): float|int|null
+    {
+        $shards = shardwise()->getShards()->active();
+
+        if (! $this->isAmphpAvailable() || $shards->count() <= 1) {
+            return null;
+        }
+
+        try {
+            $sql = $this->buildAggregateSql("{$function}(\"{$column}\")");
+            $bindings = $this->getAggregateBindings();
+            $tolerant = (bool) config('shardwise.dead_shard_tolerance', false);
+
+            $results = AsyncShardQueryExecutor::scalarAll($shards, $sql, $bindings, $tolerant);
+
+            return match ($function) {
+                'sum' => (float) array_sum(array_map('floatval', $results)),
+                'min' => min(array_filter($results, fn ($v) => $v !== null)),
+                'max' => max(array_filter($results, fn ($v) => $v !== null)),
+                default => null,
+            };
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     /**
