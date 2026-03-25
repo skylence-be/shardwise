@@ -1,6 +1,6 @@
 # Shardwise
 
-**Effortless database sharding for Laravel**
+**Shard-aware data modeling for Laravel — build horizontally scalable applications today, scale infrastructure when you need to**
 
 [![PHP 8.4+](https://img.shields.io/badge/PHP-8.4%2B-blue?style=flat-square)](https://www.php.net/)
 [![Laravel 13+](https://img.shields.io/badge/Laravel-13%2B-red?style=flat-square)](https://laravel.com/)
@@ -12,17 +12,106 @@
 
 ## Introduction
 
-Horizontal database sharding splits a single large database into multiple smaller databases (shards), each holding a subset of the data. This allows applications to scale beyond the limits of a single database server by distributing reads and writes across multiple machines.
+Shardwise lets you build Laravel applications with **shard-aware data access patterns** from day one — separating central models from sharded models, handling cross-shard relationships, and routing queries by shard key — without requiring production-grade sharding infrastructure during development.
 
-Shardwise brings first-class sharding support to Laravel without forcing you to abandon Eloquent or rewrite your application. It provides:
+### What it is
+
+- A **data modeling layer** that teaches your Eloquent models to be shard-aware (`Shardable`, `CentralModel`, `HasShardedRelationships` traits)
+- A **development and testing tool** for building multi-tenant applications with shard isolation using multiple local databases
+- A **stepping stone** to production sharding — your model traits, UUID routing, and relationship patterns transfer directly to Citus, Vitess, or any distributed database
+
+### What it is NOT
+
+- A production horizontal scaling solution for high-throughput workloads (see [Production Scaling Path](#production-scaling-path))
+- A replacement for database-native partitioning or distributed query planners
+- A silver bullet for performance — sharding adds overhead that only pays off at scale
+
+### Key capabilities
 
 - **Automatic shard routing** via consistent hashing, range-based, or modulo strategies
-- **Shard-aware Eloquent models** with seamless cross-shard queries, pagination, and aggregations
+- **Shard-aware Eloquent models** with cross-shard queries, pagination, and aggregations
 - **Central vs sharded model separation** so non-sharded tables never receive queries on the wrong connection
 - **Cross-shard relationships** that let central models define `hasMany` and `hasOne` relations to sharded models
-- **Dead shard tolerance** for high availability in production environments
+- **Dead shard tolerance** for high availability
 - **Queue job shard context preservation** ensuring dispatched jobs execute on the correct shard
 - **Shard-aware UUID generation** with embedded shard metadata for efficient routing
+
+---
+
+## When to Use Shardwise
+
+### Use it when
+
+- You're **building a multi-tenant application** and want to model shard-aware data access patterns early
+- You need **development/testing isolation** between tenants using separate databases
+- You want to **prepare your codebase** for future horizontal scaling without coupling to a specific infrastructure solution
+- You're **learning about sharding** and want to understand cross-shard relationship challenges hands-on
+
+### Don't use it when
+
+- Your dataset is **under 100GB** and queries are fast — use indexes, caching, and read replicas instead
+- You need **production horizontal scaling** — use PostgreSQL native partitioning, Citus, or Vitess
+- Your queries **frequently JOIN across shard boundaries** — redesign your schema to co-locate related data
+- You're optimizing **sub-millisecond queries** — the connection overhead of application-level sharding will make them slower
+
+### Scaling decision tree
+
+```
+Is your database over 100GB?
+├── No → Don't shard. Use indexes, caching, read replicas.
+└── Yes → Is it over 1TB?
+    ├── No → Use PostgreSQL native partitioning.
+    └── Yes → Do you need multi-region?
+        ├── No → Use Citus (PostgreSQL extension).
+        └── Yes → Use CockroachDB or Vitess.
+```
+
+Shardwise fits at **every stage** as a development tool: model your shard-aware patterns with Shardwise locally, then swap the infrastructure backend for production.
+
+---
+
+## Production Scaling Path
+
+Shardwise implements **application-level sharding** — the ORM decides which shard to query, opens connections, and merges results in PHP. This is the most flexible approach but carries overhead:
+
+| Operation | Single DB | Shardwise (3 shards) | Overhead |
+|-----------|:---------:|:--------------------:|:--------:|
+| Simple count | 0.10 ms | 0.69 ms | 6.9x |
+| Cross-shard pagination | 0.17 ms | 0.96 ms | 5.6x |
+| Complex subquery (115K rows) | 20.94 ms | **5.44 ms** | **0.26x (sharded wins)** |
+
+> Benchmark: 115K tasks across 3 PostgreSQL shards on localhost. See [full benchmark results](https://github.com/skylence-be/shardwise/blob/main/docs/benchmark-results.md) for methodology.
+
+**Why the overhead exists:** Every cross-shard query requires PHP to open N connections, execute N queries, transfer N result sets, hydrate N x M Eloquent models, and merge/sort in PHP memory. Database-native solutions handle this at the query planner level.
+
+### Recommended production architecture
+
+```
+Development          Staging              Production
+┌──────────┐     ┌──────────────┐     ┌─────────────────┐
+│ Shardwise│     │  Shardwise   │     │  Citus / Vitess  │
+│ 3 local  │ ──> │  3 separate  │ ──> │  Native sharding │
+│ PG DBs   │     │  PG servers  │     │  at DB level     │
+└──────────┘     └──────────────┘     └─────────────────┘
+
+Your code stays the same:
+- Shardable trait      → Citus distributed table
+- CentralModel trait   → Citus reference table
+- onAllShards()        → Citus handles automatically
+- Shard-aware UUIDs    → Still work for routing
+```
+
+The value of Shardwise is that your **application code** (model traits, relationship patterns, UUID routing) is already shard-aware when you're ready to move to production infrastructure. You don't rewrite your models — you change the backend.
+
+### Alternatives comparison
+
+| Approach | Query Overhead | When to Use |
+|----------|:-------------:|-------------|
+| **Shardwise** (application-level) | 5-9x on cross-shard | Development, testing, small-scale multi-tenancy |
+| **PostgreSQL partitioning** (native) | ~0% | Tables > 100GB on a single server |
+| **Citus** (PostgreSQL extension) | ~1-5% | 100GB-10TB+, need distributed queries |
+| **Vitess** (MySQL proxy) | ~1ms per hop | MySQL at massive scale (YouTube-scale) |
+| **CockroachDB** (NewSQL) | ~5-15% writes | Multi-region, automatic distribution |
 
 ---
 
