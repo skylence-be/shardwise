@@ -17,6 +17,8 @@
     ],
     "require": {
         "php": "^8.4",
+        "amphp/amp": "^3.1",
+        "amphp/postgres": "^2.2",
         "ramsey/uuid": "^4.7",
         "spatie/laravel-package-tools": "^1.92"
     },

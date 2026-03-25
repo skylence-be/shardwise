@@ -241,6 +241,7 @@ return [
     */
     'parallel_queries' => [
         'enabled' => (bool) env('SHARDWISE_PARALLEL', false),
+        'driver' => env('SHARDWISE_PARALLEL_DRIVER', 'amphp'), // 'amphp', 'concurrency', 'sequential'
     ],
 
     /*

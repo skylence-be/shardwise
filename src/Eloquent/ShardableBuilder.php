@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Skylence\Shardwise\Eloquent;
 
+use Amp\Postgres\PostgresConnectionPool;
 use Closure;
 use Illuminate\Database\DatabaseManager;
 use Illuminate\Database\Eloquent\Builder;
@@ -12,6 +13,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\Concurrency;
 use Illuminate\Support\LazyCollection;
+use Skylence\Shardwise\Async\AsyncShardQueryExecutor;
 use Skylence\Shardwise\Contracts\ShardableInterface;
 use Skylence\Shardwise\Contracts\ShardInterface;
 use Skylence\Shardwise\Query\CrossShardBuilder;
@@ -424,10 +426,16 @@ final class ShardableBuilder extends Builder
             : null;
 
         $useParallel = config('shardwise.parallel_queries.enabled', false)
-            && $shards->count() > 1
-            && class_exists(Concurrency::class);
+            && $shards->count() > 1;
 
-        if ($useParallel) {
+        $driver = config('shardwise.parallel_queries.driver', 'concurrency');
+        $useAmphp = $useParallel
+            && $driver === 'amphp'
+            && class_exists(PostgresConnectionPool::class);
+
+        if ($useAmphp) {
+            $results = $this->getFromShardsAmphp($shards, $columns, $fetchLimit, $orders);
+        } elseif ($useParallel && class_exists(Concurrency::class)) {
             $results = $this->getFromShardsParallel($shards, $columns, $fetchLimit, $orders);
         } else {
             $results = $this->getFromShardsSequential($shards, $columns, $fetchLimit, $orders);
@@ -560,6 +568,86 @@ final class ShardableBuilder extends Builder
     }
 
     /**
+     * Get results from shards concurrently using AmPHP Fibers.
+     *
+     * Builds the SQL from the current Eloquent query state and fires all
+     * shard queries simultaneously via amphp/postgres connection pools.
+     *
+     * @param  array<int, string>  $columns
+     * @param  array<int, array{column: string, direction: string}>  $orders
+     * @return Collection<int, TModel>
+     */
+    private function getFromShardsAmphp(ShardCollection $shards, array $columns, ?int $fetchLimit, array $orders): Collection
+    {
+        $model = $this->getModel();
+        $fresh = $model->newQuery();
+        $fresh->getQuery()->wheres = $this->getQuery()->wheres;
+        $fresh->getQuery()->bindings = $this->getQuery()->bindings;
+
+        foreach ($orders as $order) {
+            $fresh->orderBy($order['column'], $order['direction'] ?? 'asc');
+        }
+
+        if ($fetchLimit !== null) {
+            $fresh->limit($fetchLimit);
+        }
+
+        if ($columns !== ['*']) {
+            $fresh->select($columns);
+        }
+
+        $sql = $fresh->toSql();
+        $bindings = $fresh->getBindings();
+        $tolerateDeadShards = (bool) config('shardwise.dead_shard_tolerance', false);
+
+        try {
+            $shardResults = AsyncShardQueryExecutor::queryAll($shards, $sql, $bindings, $tolerateDeadShards);
+        } catch (Throwable $e) {
+            // Fall back to sequential if amphp fails entirely
+            return $this->getFromShardsSequential($shards, $columns, $fetchLimit, $orders);
+        }
+
+        $results = new Collection;
+        foreach ($shardResults as $rows) {
+            foreach ($rows as $row) {
+                $results->push($model->newFromBuilder((object) $row));
+            }
+        }
+
+        return $results;
+    }
+
+    /**
+     * Count from shards concurrently using AmPHP Fibers.
+     */
+    private function countFromShardsAmphp(ShardCollection $shards, string $columns = '*'): int
+    {
+        $model = $this->getModel();
+        $fresh = $model->newQuery();
+        $fresh->getQuery()->wheres = $this->getQuery()->wheres;
+        $fresh->getQuery()->bindings = $this->getQuery()->bindings;
+        $fresh->selectRaw("count({$columns}) as aggregate");
+
+        $sql = $fresh->toSql();
+        $bindings = $fresh->getBindings();
+        $tolerateDeadShards = (bool) config('shardwise.dead_shard_tolerance', false);
+
+        try {
+            $shardResults = AsyncShardQueryExecutor::scalarAll($shards, $sql, $bindings, $tolerateDeadShards);
+        } catch (Throwable $e) {
+            // Fall back to sequential if amphp fails entirely
+            return $this->countFromShardsSequential($shards, $columns);
+        }
+
+        $total = 0;
+        foreach ($shardResults as $count) {
+            $total += (int) $count;
+        }
+
+        return $total;
+    }
+
+    /**
      * Count from all shards.
      */
     private function countFromAllShards(string $columns = '*'): int
@@ -567,10 +655,18 @@ final class ShardableBuilder extends Builder
         $shards = shardwise()->getShards()->active();
 
         $useParallel = config('shardwise.parallel_queries.enabled', false)
-            && $shards->count() > 1
-            && class_exists(Concurrency::class);
+            && $shards->count() > 1;
 
-        if ($useParallel) {
+        $driver = config('shardwise.parallel_queries.driver', 'concurrency');
+        $useAmphp = $useParallel
+            && $driver === 'amphp'
+            && class_exists(PostgresConnectionPool::class);
+
+        if ($useAmphp) {
+            return $this->countFromShardsAmphp($shards, $columns);
+        }
+
+        if ($useParallel && class_exists(Concurrency::class)) {
             return $this->countFromShardsParallel($shards, $columns);
         }
 
