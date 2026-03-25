@@ -11,6 +11,8 @@ use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
+use Skylence\Shardwise\Commands\FdwSetupCommand;
+use Skylence\Shardwise\Commands\FdwTablesCommand;
 use Skylence\Shardwise\Commands\ShardHealthCommand;
 use Skylence\Shardwise\Commands\ShardListCommand;
 use Skylence\Shardwise\Commands\ShardMakeCommand;
@@ -52,6 +54,8 @@ final class ShardwiseServiceProvider extends PackageServiceProvider
                 ShardStatusCommand::class,
                 ShardSeedCommand::class,
                 ShardMakeCommand::class,
+                FdwSetupCommand::class,
+                FdwTablesCommand::class,
             ]);
     }
 

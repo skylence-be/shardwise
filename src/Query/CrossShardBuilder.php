@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection as BaseCollection;
+use Illuminate\Support\Facades\Concurrency;
 use Illuminate\Support\LazyCollection;
 use Skylence\Shardwise\Concerns\DetectsScatterQueries;
 use Skylence\Shardwise\Contracts\ShardInterface;
@@ -415,6 +416,9 @@ final class CrossShardBuilder
      * A deep-cloned builder is passed to the callback to prevent shared
      * connection/query state between shard iterations.
      *
+     * When parallel queries are enabled, shard queries run concurrently
+     * using Laravel's Concurrency facade.
+     *
      * @param  callable(ShardInterface, Builder<TModel>): mixed  $callback
      */
     private function executeOnShards(callable $callback): void
@@ -431,18 +435,36 @@ final class CrossShardBuilder
             );
         }
 
+        $useParallel = config('shardwise.parallel_queries.enabled', false)
+            && $shardCount > 1
+            && class_exists(Concurrency::class);
+
+        if ($useParallel) {
+            $this->executeOnShardsParallel($callback);
+        } else {
+            $this->executeOnShardsSequential($callback);
+        }
+    }
+
+    /**
+     * Execute a callback on each target shard sequentially.
+     *
+     * @param  callable(ShardInterface, Builder<TModel>): mixed  $callback
+     */
+    private function executeOnShardsSequential(callable $callback): void
+    {
         foreach ($this->targetShards ?? [] as $shard) {
             try {
                 shardwise()->run($shard, function () use ($shard, $callback): void {
-                    // Deep-clone the builder for each shard to avoid shared connection state
-                    $clone = $this->cloneBuilder();
+                    // Build a fresh query on the shard connection
+                    $model = $this->builder->getModel();
+                    $fresh = $model->on($shard->getConnectionName())->newQuery();
 
-                    // Explicitly set the shard connection on the cloned query builder
-                    /** @var \Illuminate\Database\DatabaseManager $db */
-                    $db = app('db');
-                    $clone->getQuery()->connection = $db->connection($shard->getConnectionName());
+                    // Re-apply wheres and bindings from the original builder
+                    $fresh->getQuery()->wheres = $this->builder->getQuery()->wheres;
+                    $fresh->getQuery()->bindings = $this->builder->getQuery()->bindings;
 
-                    $result = $callback($shard, $clone);
+                    $result = $callback($shard, $fresh);
                     $this->shardResults[$shard->getId()] = $result;
                 });
             } catch (Throwable $e) {
@@ -452,6 +474,52 @@ final class CrossShardBuilder
 
                 throw $e;
             }
+        }
+    }
+
+    /**
+     * Execute a callback on each target shard in parallel.
+     *
+     * Uses Laravel's Concurrency facade to run shard queries concurrently.
+     * Falls back to sequential execution if parallel execution fails.
+     *
+     * @param  callable(ShardInterface, Builder<TModel>): mixed  $callback
+     */
+    private function executeOnShardsParallel(callable $callback): void
+    {
+        $modelClass = get_class($this->builder->getModel());
+        $wheres = $this->builder->getQuery()->wheres;
+        $bindings = $this->builder->getQuery()->bindings;
+
+        $callbacks = [];
+        $shardMap = [];
+
+        foreach ($this->targetShards ?? [] as $shard) {
+            $shardId = $shard->getId();
+            $connectionName = $shard->getConnectionName();
+            $shardMap[$shardId] = $shard;
+
+            $callbacks[$shardId] = function () use ($modelClass, $connectionName, $wheres, $bindings, $callback, $shard): mixed {
+                /** @var Model $model */
+                $model = new $modelClass;
+                $fresh = $model->on($connectionName)->newQuery();
+                $fresh->getQuery()->wheres = $wheres;
+                $fresh->getQuery()->bindings = $bindings;
+
+                return $callback($shard, $fresh);
+            };
+        }
+
+        try {
+            /** @var array<string, mixed> $results */
+            $results = Concurrency::run($callbacks);
+
+            foreach ($results as $shardId => $result) {
+                $this->shardResults[$shardId] = $result;
+            }
+        } catch (Throwable) {
+            // Fall back to sequential if parallel fails
+            $this->executeOnShardsSequential($callback);
         }
     }
 }

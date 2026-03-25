@@ -3,7 +3,8 @@
     "allow": [
       "Bash(composer test:*)",
       "Bash(cmd /c \"composer test:types\")",
-      "Bash(php:*)"
+      "Bash(php:*)",
+      "WebSearch"
     ],
     "deny": []
   }

@@ -29,6 +29,9 @@
         "phpstan/phpstan": "^2.1",
         "rector/rector": "^2.1"
     },
+    "suggest": {
+        "ext-pdo_pgsql": "Required for postgres_fdw support and optimal performance"
+    },
     "autoload": {
         "psr-4": {
             "Skylence\\Shardwise\\": "src/",

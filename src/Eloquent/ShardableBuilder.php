@@ -10,11 +10,13 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Facades\Concurrency;
 use Illuminate\Support\LazyCollection;
 use Skylence\Shardwise\Contracts\ShardableInterface;
 use Skylence\Shardwise\Contracts\ShardInterface;
 use Skylence\Shardwise\Query\CrossShardBuilder;
 use Skylence\Shardwise\Query\CrossShardPaginator;
+use Skylence\Shardwise\ShardCollection;
 use Skylence\Shardwise\Uuid\UuidShardDecoder;
 use Throwable;
 
@@ -97,6 +99,13 @@ final class ShardableBuilder extends Builder
     public function get($columns = ['*']): Collection
     {
         if ($this->allShards) {
+            if (config('shardwise.co_location.enabled', true)) {
+                $targetShard = $this->resolveShardFromConstraints();
+                if ($targetShard !== null) {
+                    return $this->onShard($targetShard)->get($columns);
+                }
+            }
+
             return $this->getFromAllShards($columns);
         }
 
@@ -111,6 +120,13 @@ final class ShardableBuilder extends Builder
     public function count($columns = '*'): int
     {
         if ($this->allShards) {
+            if (config('shardwise.co_location.enabled', true)) {
+                $targetShard = $this->resolveShardFromConstraints();
+                if ($targetShard !== null) {
+                    return $this->onShard($targetShard)->count($columns);
+                }
+            }
+
             return $this->countFromAllShards($columns);
         }
 
@@ -125,10 +141,17 @@ final class ShardableBuilder extends Builder
     public function sum($column): float|int
     {
         if ($this->allShards) {
+            if (config('shardwise.co_location.enabled', true)) {
+                $targetShard = $this->resolveShardFromConstraints();
+                if ($targetShard !== null) {
+                    return $this->onShard($targetShard)->sum($column);
+                }
+            }
+
             return $this->crossShard()->sum($column);
         }
 
-        return parent::sum($column);
+        return (float) parent::sum($column);
     }
 
     /**
@@ -139,6 +162,13 @@ final class ShardableBuilder extends Builder
     public function avg($column): float|int
     {
         if ($this->allShards) {
+            if (config('shardwise.co_location.enabled', true)) {
+                $targetShard = $this->resolveShardFromConstraints();
+                if ($targetShard !== null) {
+                    return $this->onShard($targetShard)->avg($column);
+                }
+            }
+
             return $this->crossShard()->avg($column);
         }
 
@@ -153,6 +183,13 @@ final class ShardableBuilder extends Builder
     public function min($column): mixed
     {
         if ($this->allShards) {
+            if (config('shardwise.co_location.enabled', true)) {
+                $targetShard = $this->resolveShardFromConstraints();
+                if ($targetShard !== null) {
+                    return $this->onShard($targetShard)->min($column);
+                }
+            }
+
             return $this->crossShard()->min($column);
         }
 
@@ -167,6 +204,13 @@ final class ShardableBuilder extends Builder
     public function max($column): mixed
     {
         if ($this->allShards) {
+            if (config('shardwise.co_location.enabled', true)) {
+                $targetShard = $this->resolveShardFromConstraints();
+                if ($targetShard !== null) {
+                    return $this->onShard($targetShard)->max($column);
+                }
+            }
+
             return $this->crossShard()->max($column);
         }
 
@@ -185,6 +229,13 @@ final class ShardableBuilder extends Builder
     public function paginate($perPage = 15, $columns = ['*'], $pageName = 'page', $page = null, $total = null): LengthAwarePaginator
     {
         if ($this->allShards) {
+            if (config('shardwise.co_location.enabled', true)) {
+                $targetShard = $this->resolveShardFromConstraints();
+                if ($targetShard !== null) {
+                    return $this->onShard($targetShard)->paginate($perPage, $columns, $pageName, $page, $total);
+                }
+            }
+
             $paginator = new CrossShardPaginator($this);
 
             // Extract ordering from the builder
@@ -315,6 +366,36 @@ final class ShardableBuilder extends Builder
     }
 
     /**
+     * Resolve a target shard from the query's WHERE constraints.
+     *
+     * When the query contains a WHERE clause on the model's shard key column
+     * with a basic equality operator, we can route directly to that shard
+     * instead of querying all shards.
+     */
+    private function resolveShardFromConstraints(): ?ShardInterface
+    {
+        if (! $this->model instanceof ShardableInterface) {
+            return null;
+        }
+
+        $shardKeyColumn = $this->model->getShardKeyColumn();
+
+        foreach ($this->getQuery()->wheres as $where) {
+            if (($where['column'] ?? null) === $shardKeyColumn
+                && ($where['type'] ?? null) === 'Basic'
+                && ($where['operator'] ?? null) === '=') {
+                try {
+                    return shardwise()->route($where['value']);
+                } catch (Throwable) {
+                    return null;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Get results from all shards and merge them.
      *
      * Captures ordering and limit/offset from the query, strips them from
@@ -329,8 +410,6 @@ final class ShardableBuilder extends Builder
         /** @var array<int, string> $columns */
         $columns = is_array($columns) ? $columns : func_get_args();
 
-        $results = new Collection;
-
         $shards = shardwise()->getShards()->active();
 
         // Capture ordering and limit/offset from the underlying query
@@ -344,37 +423,14 @@ final class ShardableBuilder extends Builder
             ? ($originalOffset ?? 0) + $originalLimit
             : null;
 
-        foreach ($shards as $shard) {
-            try {
-                $shardResults = shardwise()->run($shard, function () use ($shard, $columns, $fetchLimit): Collection {
-                    // Deep-clone the builder (including underlying query) to avoid shared connection state
-                    $clone = $this->clone();
-                    $clone->allShards = false;
+        $useParallel = config('shardwise.parallel_queries.enabled', false)
+            && $shards->count() > 1
+            && class_exists(Concurrency::class);
 
-                    // Explicitly set the shard connection on the cloned query builder
-                    // (the clone inherits the original connection, not the shard context)
-                    /** @var DatabaseManager $db */
-                    $db = app('db');
-                    $clone->getQuery()->connection = $db->connection($shard->getConnectionName());
-
-                    // Override limit to fetch enough for global pagination
-                    if ($fetchLimit !== null) {
-                        $clone->getQuery()->limit = $fetchLimit;
-                        $clone->getQuery()->offset = null;
-                    }
-
-                    // Call get() on the clone, which will now use parent::get() since allShards is false
-                    return $clone->get($columns);
-                });
-
-                $results = $results->merge($shardResults);
-            } catch (Throwable $e) {
-                if (config('shardwise.dead_shard_tolerance', false)) {
-                    continue;
-                }
-
-                throw $e;
-            }
+        if ($useParallel) {
+            $results = $this->getFromShardsParallel($shards, $columns, $fetchLimit, $orders);
+        } else {
+            $results = $this->getFromShardsSequential($shards, $columns, $fetchLimit, $orders);
         }
 
         // Apply global ordering
@@ -391,28 +447,155 @@ final class ShardableBuilder extends Builder
     }
 
     /**
+     * Get results from shards sequentially.
+     *
+     * @param  array<int, string>  $columns
+     * @param  array<int, array{column: string, direction: string}>  $orders
+     * @return Collection<int, TModel>
+     */
+    private function getFromShardsSequential(ShardCollection $shards, array $columns, ?int $fetchLimit, array $orders): Collection
+    {
+        $results = new Collection;
+
+        foreach ($shards as $shard) {
+            try {
+                $shardResults = shardwise()->run($shard, function () use ($shard, $columns, $fetchLimit, $orders): Collection {
+                    // Build a fresh query on the shard connection to avoid clone/connection issues
+                    $model = $this->getModel();
+                    $fresh = $model->on($shard->getConnectionName())->newQuery();
+
+                    // Re-apply wheres from the original builder
+                    $fresh->getQuery()->wheres = $this->getQuery()->wheres;
+                    $fresh->getQuery()->bindings = $this->getQuery()->bindings;
+
+                    // Re-apply ordering
+                    foreach ($orders as $order) {
+                        $fresh->orderBy($order['column'], $order['direction'] ?? 'asc');
+                    }
+
+                    // Re-apply eager loads
+                    $fresh->setEagerLoads($this->getEagerLoads());
+
+                    // Override limit to fetch enough for global pagination
+                    if ($fetchLimit !== null) {
+                        $fresh->limit($fetchLimit);
+                    }
+
+                    return $fresh->get($columns);
+                });
+
+                $results = $results->merge($shardResults);
+            } catch (Throwable $e) {
+                if (config('shardwise.dead_shard_tolerance', false)) {
+                    continue;
+                }
+
+                throw $e;
+            }
+        }
+
+        return $results;
+    }
+
+    /**
+     * Get results from shards in parallel using Laravel's Concurrency facade.
+     *
+     * Each shard query runs in a separate process with its own database
+     * connection. Results are serialized/deserialized between processes.
+     *
+     * @param  array<int, string>  $columns
+     * @param  array<int, array{column: string, direction: string}>  $orders
+     * @return Collection<int, TModel>
+     */
+    private function getFromShardsParallel(ShardCollection $shards, array $columns, ?int $fetchLimit, array $orders): Collection
+    {
+        $modelClass = get_class($this->model);
+        $wheres = $this->getQuery()->wheres;
+        $bindings = $this->getQuery()->bindings;
+        $eagerLoads = $this->getEagerLoads();
+
+        $callbacks = [];
+        foreach ($shards as $shard) {
+            $shardId = $shard->getId();
+            $connectionName = $shard->getConnectionName();
+
+            $callbacks[$shardId] = function () use ($modelClass, $connectionName, $wheres, $bindings, $columns, $fetchLimit, $orders, $eagerLoads): array {
+                /** @var Model $model */
+                $model = new $modelClass;
+                $fresh = $model->on($connectionName)->newQuery();
+                $fresh->getQuery()->wheres = $wheres;
+                $fresh->getQuery()->bindings = $bindings;
+
+                foreach ($orders as $order) {
+                    $fresh->orderBy($order['column'], $order['direction'] ?? 'asc');
+                }
+
+                $fresh->setEagerLoads($eagerLoads);
+
+                if ($fetchLimit !== null) {
+                    $fresh->limit($fetchLimit);
+                }
+
+                return $fresh->get($columns)->toArray();
+            };
+        }
+
+        try {
+            /** @var array<string, array<int, array<string, mixed>>> $shardResults */
+            $shardResults = Concurrency::run($callbacks);
+
+            $results = new Collection;
+            $model = $this->getModel();
+            foreach ($shardResults as $shardData) {
+                foreach ($shardData as $row) {
+                    $results->push($model->newFromBuilder((object) $row));
+                }
+            }
+
+            return $results;
+        } catch (Throwable) {
+            // Fall back to sequential if parallel fails
+            return $this->getFromShardsSequential($shards, $columns, $fetchLimit, $orders);
+        }
+    }
+
+    /**
      * Count from all shards.
      */
     private function countFromAllShards(string $columns = '*'): int
     {
-        $total = 0;
-
         $shards = shardwise()->getShards()->active();
+
+        $useParallel = config('shardwise.parallel_queries.enabled', false)
+            && $shards->count() > 1
+            && class_exists(Concurrency::class);
+
+        if ($useParallel) {
+            return $this->countFromShardsParallel($shards, $columns);
+        }
+
+        return $this->countFromShardsSequential($shards, $columns);
+    }
+
+    /**
+     * Count from all shards sequentially.
+     */
+    private function countFromShardsSequential(ShardCollection $shards, string $columns = '*'): int
+    {
+        $total = 0;
 
         foreach ($shards as $shard) {
             try {
                 $count = shardwise()->run($shard, function () use ($shard, $columns): int {
-                    // Deep-clone the builder (including underlying query) to avoid shared connection state
-                    $clone = $this->clone();
-                    $clone->allShards = false;
+                    // Build a fresh query on the shard connection
+                    $model = $this->getModel();
+                    $fresh = $model->on($shard->getConnectionName())->newQuery();
 
-                    // Explicitly set the shard connection on the cloned query builder
-                    /** @var DatabaseManager $db */
-                    $db = app('db');
-                    $clone->getQuery()->connection = $db->connection($shard->getConnectionName());
+                    // Re-apply wheres from the original builder
+                    $fresh->getQuery()->wheres = $this->getQuery()->wheres;
+                    $fresh->getQuery()->bindings = $this->getQuery()->bindings;
 
-                    // Call count() on the clone, which will now use parent::count() since allShards is false
-                    return $clone->count($columns);
+                    return $fresh->count($columns);
                 });
 
                 $total += $count;
@@ -426,6 +609,42 @@ final class ShardableBuilder extends Builder
         }
 
         return $total;
+    }
+
+    /**
+     * Count from all shards in parallel using Laravel's Concurrency facade.
+     */
+    private function countFromShardsParallel(ShardCollection $shards, string $columns = '*'): int
+    {
+        $modelClass = get_class($this->model);
+        $wheres = $this->getQuery()->wheres;
+        $bindings = $this->getQuery()->bindings;
+
+        $callbacks = [];
+        foreach ($shards as $shard) {
+            $shardId = $shard->getId();
+            $connectionName = $shard->getConnectionName();
+
+            $callbacks[$shardId] = function () use ($modelClass, $connectionName, $wheres, $bindings, $columns): int {
+                /** @var Model $model */
+                $model = new $modelClass;
+                $fresh = $model->on($connectionName)->newQuery();
+                $fresh->getQuery()->wheres = $wheres;
+                $fresh->getQuery()->bindings = $bindings;
+
+                return $fresh->count($columns);
+            };
+        }
+
+        try {
+            /** @var array<string, int> $shardCounts */
+            $shardCounts = Concurrency::run($callbacks);
+
+            return array_sum($shardCounts);
+        } catch (Throwable) {
+            // Fall back to sequential if parallel fails
+            return $this->countFromShardsSequential($shards, $columns);
+        }
     }
 
     /**

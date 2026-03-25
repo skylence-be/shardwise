@@ -219,6 +219,48 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Co-location Routing
+    |--------------------------------------------------------------------------
+    |
+    | When enabled, queries with a WHERE clause on the shard key column
+    | are automatically routed to a single shard instead of querying all.
+    |
+    */
+    'co_location' => [
+        'enabled' => (bool) env('SHARDWISE_COLOCATION', true),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Parallel Query Execution
+    |--------------------------------------------------------------------------
+    |
+    | When enabled, cross-shard queries run in parallel using Laravel's
+    | Concurrency facade instead of sequentially.
+    |
+    */
+    'parallel_queries' => [
+        'enabled' => (bool) env('SHARDWISE_PARALLEL', false),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | PostgreSQL Foreign Data Wrapper
+    |--------------------------------------------------------------------------
+    |
+    | Configuration for postgres_fdw support. When using the fdw commands,
+    | the coordinator connection is used to create foreign servers, user
+    | mappings, foreign tables, and unified views.
+    |
+    */
+    'fdw' => [
+        'enabled' => (bool) env('SHARDWISE_FDW_ENABLED', false),
+        'coordinator_connection' => env('SHARDWISE_FDW_CONNECTION', 'pgsql'),
+        'view_prefix' => 'all_',
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Migrations
     |--------------------------------------------------------------------------
     |
