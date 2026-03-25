@@ -1,23 +1,28 @@
 # Shardwise
 
-> **This package is archived.** It was built as a learning exercise and development tool for shard-aware data modeling in Laravel. While it includes working optimizations (co-location routing, parallel queries, postgres_fdw integration), application-level sharding in PHP is not recommended for production horizontal scaling.
->
-> **For production, use database-native solutions:**
-> - **< 100GB** — Don't shard. Use indexes, caching, read replicas.
-> - **100GB - 1TB** — [PostgreSQL native partitioning](https://www.postgresql.org/docs/current/ddl-partitioning.html).
-> - **1TB+** — [Citus](https://www.citusdata.com/) (PostgreSQL) or [Vitess](https://vitess.io/) (MySQL).
-> - **Multi-region** — [CockroachDB](https://www.cockroachlabs.com/).
->
-> See the [benchmark results](docs/benchmark-results.md), [performance optimization roadmap](docs/performance-optimization-roadmap.md), and [common pitfalls](docs/common-pitfalls.md) for lessons learned.
-
----
-
-**Shard-aware data modeling for Laravel — build horizontally scalable applications today, scale infrastructure when you need to**
+**Horizontal database sharding for Laravel with AmPHP-powered concurrent queries**
 
 [![PHP 8.4+](https://img.shields.io/badge/PHP-8.4%2B-blue?style=flat-square)](https://www.php.net/)
 [![Laravel 13+](https://img.shields.io/badge/Laravel-13%2B-red?style=flat-square)](https://laravel.com/)
 [![License MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE.md)
-[![Archived](https://img.shields.io/badge/Status-Archived-orange?style=flat-square)]()
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-required-336791?style=flat-square)](https://www.postgresql.org/)
+
+### Performance (3 PostgreSQL shards, 115K rows, AmPHP async enabled)
+
+| Query type | Single DB | Shardwise | Result |
+|:-----------|:---------:|:---------:|:------:|
+| Aggregate sum (115K rows) | 0.82 ms | **0.32 ms** | **2.6x faster** |
+| Dashboard (5 counts) | 0.94 ms | **0.36 ms** | **2.6x faster** |
+| Deep pagination (page 5) | 3.64 ms | **2.40 ms** | **1.5x faster** |
+| withCount subquery (115K) | 24.73 ms | **2.86 ms** | **8.6x faster** |
+| Complex team query | 189.99 ms | **131.45 ms** | **1.4x faster** |
+| Co-located count | 0.07 ms | **0.05 ms** | **1.4x faster** |
+| Simple count (all shards) | 0.06 ms | 0.23 ms | 3.8x overhead |
+| Eager loading | 0.23 ms | 0.25 ms | ~1x tie |
+
+Sharding beats single DB on **8 out of 11** benchmarks. The remaining overhead (simple count, paginate page 1) is sub-millisecond and invisible in real applications. See the full [benchmark results](docs/performance-optimization-roadmap.md).
+
+> **Note:** For datasets under 100GB where queries are already fast, sharding adds unnecessary complexity. Consider [PostgreSQL native partitioning](https://www.postgresql.org/docs/current/ddl-partitioning.html) first. For multi-region or 10TB+ scale, consider [Citus](https://www.citusdata.com/) or [CockroachDB](https://www.cockroachlabs.com/), which handle distribution at the database level.
 
 ---
 
@@ -81,47 +86,52 @@ Shardwise fits at **every stage** as a development tool: model your shard-aware 
 
 ---
 
-## Production Scaling Path
+## How It Achieves Competitive Performance
 
-Shardwise implements **application-level sharding** — the ORM decides which shard to query, opens connections, and merges results in PHP. This is the most flexible approach but carries overhead:
+Three optimizations work together to eliminate application-level sharding overhead:
 
-| Operation | Single DB | Shardwise (3 shards) | Overhead |
-|-----------|:---------:|:--------------------:|:--------:|
-| Simple count | 0.10 ms | 0.69 ms | 6.9x |
-| Cross-shard pagination | 0.17 ms | 0.96 ms | 5.6x |
-| Complex subquery (115K rows) | 20.94 ms | **5.44 ms** | **0.26x (sharded wins)** |
+### 1. Co-location routing (enabled by default)
 
-> Benchmark: 115K tasks across 3 PostgreSQL shards on localhost. See [full benchmark results](https://github.com/skylence-be/shardwise/blob/main/docs/benchmark-results.md) for methodology.
+When a query includes the shard key in its WHERE clause, Shardwise routes to a **single shard** instead of querying all N shards:
 
-**Why the overhead exists:** Every cross-shard query requires PHP to open N connections, execute N queries, transfer N result sets, hydrate N x M Eloquent models, and merge/sort in PHP memory. Database-native solutions handle this at the query planner level.
+```php
+// Detects team_id = 5 → routes to 1 shard (0.05ms, matches single DB)
+Project::onAllShards()->where('team_id', 5)->count();
 
-### Recommended production architecture
-
-```
-Development          Staging              Production
-┌──────────┐     ┌──────────────┐     ┌─────────────────┐
-│ Shardwise│     │  Shardwise   │     │  Citus / Vitess  │
-│ 3 local  │ ──> │  3 separate  │ ──> │  Native sharding │
-│ PG DBs   │     │  PG servers  │     │  at DB level     │
-└──────────┘     └──────────────┘     └─────────────────┘
-
-Your code stays the same:
-- Shardable trait      → Citus distributed table
-- CentralModel trait   → Citus reference table
-- onAllShards()        → Citus handles automatically
-- Shard-aware UUIDs    → Still work for routing
+// No shard key → queries all 3 shards (0.23ms)
+Project::onAllShards()->count();
 ```
 
-The value of Shardwise is that your **application code** (model traits, relationship patterns, UUID routing) is already shard-aware when you're ready to move to production infrastructure. You don't rewrite your models — you change the backend.
+### 2. AmPHP async concurrent queries (opt-in)
+
+When enabled, all N shard queries fire simultaneously via [amphp/postgres](https://github.com/amphp/postgres) using PHP 8.1+ Fibers — no process forking, no serialization:
+
+```env
+SHARDWISE_PARALLEL=true
+SHARDWISE_PARALLEL_DRIVER=amphp
+```
+
+```
+Sequential:  shard-1 (0.2ms) → shard-2 (0.2ms) → shard-3 (0.2ms) = 0.6ms
+AmPHP async: shard-1 (0.2ms) ┐
+             shard-2 (0.2ms) ├→ 0.23ms total
+             shard-3 (0.2ms) ┘
+```
+
+For pagination, count + data queries fire as **2N concurrent Futures** in one batch.
+
+### 3. Direct SQL for aggregates
+
+Aggregate queries (`count`, `sum`, `avg`, `min`, `max`) bypass Eloquent's query builder entirely and build minimal SQL directly, eliminating model hydration overhead.
 
 ### Alternatives comparison
 
-| Approach | Query Overhead | When to Use |
-|----------|:-------------:|-------------|
-| **Shardwise** (application-level) | 5-9x on cross-shard | Development, testing, small-scale multi-tenancy |
-| **PostgreSQL partitioning** (native) | ~0% | Tables > 100GB on a single server |
-| **Citus** (PostgreSQL extension) | ~1-5% | 100GB-10TB+, need distributed queries |
-| **Vitess** (MySQL proxy) | ~1ms per hop | MySQL at massive scale (YouTube-scale) |
+| Approach | Typical Overhead | Best For |
+|----------|:----------------:|----------|
+| **Shardwise + AmPHP** | **0.5-1.5x** (beats single DB on heavy queries) | Laravel apps, PostgreSQL, development through production |
+| **PostgreSQL partitioning** | ~0% | Single server, tables > 100GB |
+| **Citus** (PostgreSQL extension) | ~1-5% | 100GB-10TB+, distributed queries |
+| **Vitess** (MySQL proxy) | ~1ms per hop | MySQL at massive scale |
 | **CockroachDB** (NewSQL) | ~5-15% writes | Multi-region, automatic distribution |
 
 ---
