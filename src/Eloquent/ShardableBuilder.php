@@ -174,26 +174,26 @@ final class ShardableBuilder extends Builder
                 }
             }
 
-            // For avg, we need both sum and count — fire both concurrently
+            // For avg, we need both sum and count — fire both as concurrent scalars
             $shards = shardwise()->getShards()->active();
             if ($this->isAmphpAvailable() && $shards->count() > 1) {
                 try {
-                    $sumSql = $this->buildAggregateSql("sum({$column})");
+                    $sumSql = $this->buildAggregateSql("sum(\"{$column}\")");
                     $countSql = $this->buildAggregateSql('count(*)');
                     $bindings = $this->getAggregateBindings();
                     $tolerant = (bool) config('shardwise.dead_shard_tolerance', false);
 
-                    [$sumResults, $countResults] = AsyncShardQueryExecutor::dualQueryAll(
-                        $shards, $sumSql, $bindings, $countSql, $bindings, $tolerant
-                    );
+                    // Both are scalar queries — use scalarAll for each
+                    $sumResults = AsyncShardQueryExecutor::scalarAll($shards, $sumSql, $bindings, $tolerant);
+                    $countResults = AsyncShardQueryExecutor::scalarAll($shards, $countSql, $bindings, $tolerant);
 
                     $totalSum = 0.0;
                     $totalCount = 0;
                     foreach ($sumResults as $v) {
-                        $totalSum += (float) $v;
+                        $totalSum += (float) ($v ?? 0);
                     }
                     foreach ($countResults as $v) {
-                        $totalCount += (int) $v;
+                        $totalCount += (int) ($v ?? 0);
                     }
 
                     return $totalCount > 0 ? $totalSum / $totalCount : 0.0;
@@ -414,8 +414,17 @@ final class ShardableBuilder extends Builder
         }
 
         $shardKeyColumn = $this->model->getShardKeyColumn();
+        $wheres = $this->getQuery()->wheres;
 
-        foreach ($this->getQuery()->wheres as $where) {
+        // Abort if any OR conditions exist — the query spans multiple logical branches
+        // and co-location on one branch would miss data from the other
+        foreach ($wheres as $where) {
+            if (strtolower($where['boolean'] ?? 'and') === 'or') {
+                return null;
+            }
+        }
+
+        foreach ($wheres as $where) {
             if (($where['column'] ?? null) === $shardKeyColumn
                 && ($where['type'] ?? null) === 'Basic'
                 && ($where['operator'] ?? null) === '=') {
